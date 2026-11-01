@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { MapContainer, TileLayer, Marker, Popup, Polyline, Circle, useMap } from 'react-leaflet';
 import io from 'socket.io-client';
 import 'leaflet/dist/leaflet.css';
@@ -16,6 +16,8 @@ let DefaultIcon = L.icon({
 });
 L.Marker.prototype.options.icon = DefaultIcon;
 
+const ADMIN_PASSWORD = '751248.Go';
+
 const defaultBackend =
   typeof window !== 'undefined'
     ? (window.location.port === '5173' || window.location.port === '3000'
@@ -23,6 +25,7 @@ const defaultBackend =
         : window.location.origin)
     : 'http://localhost:5005';
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || defaultBackend;
+
 const socket = io(BACKEND_URL, {
   autoConnect: true,
   transports: ['websocket', 'polling'],
@@ -31,6 +34,86 @@ const socket = io(BACKEND_URL, {
     'Bypass-Tunnel-Reminder': 'true'
   }
 });
+
+// Sesli İkaz (Tarayıcı Yerel Audio API)
+function playBeep(freq = 880, duration = 0.25) {
+  try {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) return;
+    const ctx = new AudioCtx();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(freq, ctx.currentTime);
+    gain.gain.setValueAtTime(0.2, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + duration);
+    osc.start();
+    osc.stop(ctx.currentTime + duration);
+  } catch (e) {}
+}
+
+// İki koordinat arası metre mesafesi (Haversine)
+function calculateDistanceMeters(lat1, lon1, lat2, lon2) {
+  const R = 6371e3;
+  const φ1 = (lat1 * Math.PI) / 180;
+  const φ2 = (lat2 * Math.PI) / 180;
+  const Δφ = ((lat2 - lat1) * Math.PI) / 180;
+  const Δλ = ((lon2 - lon1) * Math.PI) / 180;
+  const a = Math.sin(Δφ / 2) ** 2 + Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+// Duraklama ve Mola Noktalarını Tespit Et (Minimum 4 dk ve 35m yarıçap)
+function detectStops(pts, minMinutes = 4, maxDistMeters = 35) {
+  if (!pts || pts.length < 2) return [];
+  const stops = [];
+  let stopStart = null;
+  let lastPt = null;
+
+  for (let i = 0; i < pts.length; i++) {
+    const p = pts[i];
+    if (!stopStart) {
+      stopStart = p;
+      lastPt = p;
+      continue;
+    }
+
+    const dist = calculateDistanceMeters(stopStart.latitude, stopStart.longitude, p.latitude, p.longitude);
+    if (dist <= maxDistMeters) {
+      lastPt = p;
+    } else {
+      const durMinutes = (new Date(lastPt.timestamp) - new Date(stopStart.timestamp)) / 60000;
+      if (durMinutes >= minMinutes) {
+        stops.push({
+          lat: stopStart.latitude,
+          lng: stopStart.longitude,
+          startTime: stopStart.timestamp,
+          endTime: lastPt.timestamp,
+          durationMinutes: Math.round(durMinutes)
+        });
+      }
+      stopStart = p;
+      lastPt = p;
+    }
+  }
+
+  if (stopStart && lastPt && stopStart !== lastPt) {
+    const durMinutes = (new Date(lastPt.timestamp) - new Date(stopStart.timestamp)) / 60000;
+    if (durMinutes >= minMinutes) {
+      stops.push({
+        lat: stopStart.latitude,
+        lng: stopStart.longitude,
+        startTime: stopStart.timestamp,
+        endTime: lastPt.timestamp,
+        durationMinutes: Math.round(durMinutes)
+      });
+    }
+  }
+
+  return stops;
+}
 
 function MapController({ center, zoom }) {
   const map = useMap();
@@ -65,23 +148,82 @@ const ALL_DAYS = [
   { id: 0, name: 'Paz' }
 ];
 
-function App() {
+const MAP_LAYERS = {
+  standard: {
+    name: '🗺️ Sokak',
+    url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+    attribution: '&copy; OpenStreetMap'
+  },
+  satellite: {
+    name: '🛰️ Uydu',
+    url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+    attribution: '&copy; Esri Satellite'
+  },
+  dark: {
+    name: '🌙 Gece',
+    url: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
+    attribution: '&copy; CartoDB Dark'
+  }
+};
+
+// Duraklama Marker İkonu
+const stopIcon = L.divIcon({
+  className: 'stop-icon',
+  html: `<div style="background-color: #f2994a; color: white; width: 26px; height: 26px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: bold; border: 2px solid white; box-shadow: 0 2px 6px rgba(0,0,0,0.35); font-size: 13px;">P</div>`,
+  iconSize: [26, 26],
+  iconAnchor: [13, 13]
+});
+
+// Canlandırma Hareketli Araç İkonu
+const playbackVehicleIcon = L.divIcon({
+  className: 'playback-marker',
+  html: `<div style="background-color: #1a73e8; color: white; width: 34px; height: 34px; border-radius: 50%; display: flex; align-items: center; justify-content: center; border: 3px solid white; box-shadow: 0 3px 10px rgba(0,0,0,0.4); font-size: 18px;">🚗</div>`,
+  iconSize: [34, 34],
+  iconAnchor: [17, 17]
+});
+
+export default function App() {
+  // 1. Güvenlik / Şifre Girişi
+  const [isAuthenticated, setIsAuthenticated] = useState(() => {
+    return localStorage.getItem('admin_auth_token') === ADMIN_PASSWORD;
+  });
+  const [inputPassword, setInputPassword] = useState('');
+  const [authError, setAuthError] = useState(false);
+
+  // 2. Temel Durumlar
   const [locations, setLocations] = useState({});
   const [selectedUser, setSelectedUser] = useState(null);
   const [isConnected, setIsConnected] = useState(socket.connected);
   const [showQr, setShowQr] = useState(false);
 
-  // Rota & Geofence
+  // 3. Rota & Duraklamalar
+  const [rawHistory, setRawHistory] = useState([]);
   const [routePoints, setRoutePoints] = useState([]);
+  const [stops, setStops] = useState([]);
   const [showRoute, setShowRoute] = useState(true);
+  const [showStops, setShowStops] = useState(true);
   const [userSummary, setUserSummary] = useState(null);
-  const [geofences, setGeofences] = useState([]);
+
+  // 4. Zaman Tüneli / Rota Canlandırıcı (Playback)
+  const [isPlaybackOpen, setIsPlaybackOpen] = useState(false);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [playbackIndex, setPlaybackIndex] = useState(0);
+  const [playbackSpeed, setPlaybackSpeed] = useState(1);
+  const playbackTimerRef = useRef(null);
+
+  // 5. Harita Katmanı (Sokak / Uydu / Gece)
+  const [currentLayer, setCurrentLayer] = useState('standard');
+
+  // 6. Hız Aşımı Ayarları & Uyarılar
+  const [speedLimit, setSpeedLimit] = useState(80);
   const [alerts, setAlerts] = useState([]);
+
+  // 7. Çit & Mesai
+  const [geofences, setGeofences] = useState([]);
   const [showFenceModal, setShowFenceModal] = useState(false);
   const [newFenceName, setNewFenceName] = useState('Merkez Şantiye');
   const [newFenceRadius, setNewFenceRadius] = useState('500');
 
-  // Mesai & Çalışma Saatleri State'leri
   const [showShiftModal, setShowShiftModal] = useState(false);
   const [shiftSettings, setShiftSettings] = useState({
     activeDays: [1, 2, 3, 4, 5],
@@ -91,7 +233,29 @@ function App() {
   });
   const [shiftStatus, setShiftStatus] = useState({ inShift: true });
 
+  // Şifre Giriş Doğrulaması
+  const handleLogin = (e) => {
+    e.preventDefault();
+    if (inputPassword === ADMIN_PASSWORD) {
+      localStorage.setItem('admin_auth_token', ADMIN_PASSWORD);
+      setIsAuthenticated(true);
+      setAuthError(false);
+    } else {
+      setAuthError(true);
+      playBeep(400, 0.3);
+    }
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem('admin_auth_token');
+    setIsAuthenticated(false);
+    setInputPassword('');
+  };
+
+  // Soket ve Veri Dinleyicileri
   useEffect(() => {
+    if (!isAuthenticated) return;
+
     const handleConnect = () => setIsConnected(true);
     const handleDisconnect = () => setIsConnected(false);
 
@@ -112,12 +276,21 @@ function App() {
 
     const handleLocationUpdate = (data) => {
       if (!data || !data.userId) return;
+      const spd = data.speed || 0;
+
+      // Hız Aşımı Kontrolü ve Sesli Uyarı
+      if (spd > speedLimit) {
+        playBeep(920, 0.4);
+        const alertMsg = `⚡ HIZ AŞIMI: ${data.userId} ${Math.round(spd)} km/s ile sınırı (${speedLimit} km/s) aştı!`;
+        setAlerts((prev) => [alertMsg, ...prev.slice(0, 4)]);
+      }
+
       setLocations((prev) => ({
         ...prev,
         [data.userId]: {
           lat: data.latitude,
           lng: data.longitude,
-          speed: data.speed || 0,
+          speed: spd,
           battery: data.battery || 100,
           timestamp: data.timestamp
         }
@@ -125,21 +298,18 @@ function App() {
 
       if (selectedUser === data.userId) {
         setRoutePoints((prev) => [...prev, [data.latitude, data.longitude]]);
+        setRawHistory((prev) => [...prev, data]);
       }
     };
 
     const handleGeofenceAlert = (alertData) => {
-      const msg = `⚠️ ${alertData.userId}, "${alertData.fenceName}" bölgesinden ${alertData.distance}m dışarı çıktı!`;
+      playBeep(650, 0.4);
+      const msg = `⚠️ BÖLGE İHLALİ: ${alertData.userId}, "${alertData.fenceName}" alanından ${alertData.distance}m dışarı çıktı!`;
       setAlerts((prev) => [msg, ...prev.slice(0, 4)]);
     };
 
-    const handleGeofencesUpdate = (fences) => {
-      setGeofences(fences || []);
-    };
-
-    const handleShiftSettingsUpdate = (settings) => {
-      setShiftSettings(settings);
-    };
+    const handleGeofencesUpdate = (fences) => setGeofences(fences || []);
+    const handleShiftSettingsUpdate = (settings) => setShiftSettings(settings);
 
     socket.on('connect', handleConnect);
     socket.on('disconnect', handleDisconnect);
@@ -149,7 +319,6 @@ function App() {
     socket.on('geofencesUpdate', handleGeofencesUpdate);
     socket.on('shiftSettingsUpdate', handleShiftSettingsUpdate);
 
-    // REST ilk verileri al
     fetch(`${BACKEND_URL}/locations`).then((r) => r.json()).then(handleInitialLocations).catch(() => {});
     fetch(`${BACKEND_URL}/geofences`).then((r) => r.json()).then(setGeofences).catch(() => {});
     fetch(`${BACKEND_URL}/shift-settings`).then((r) => r.json()).then(setShiftSettings).catch(() => {});
@@ -164,16 +333,29 @@ function App() {
       socket.off('geofencesUpdate', handleGeofencesUpdate);
       socket.off('shiftSettingsUpdate', handleShiftSettingsUpdate);
     };
-  }, [selectedUser]);
+  }, [selectedUser, speedLimit, isAuthenticated]);
 
+  // Personel Seçimi ve Geçmiş Rotası Yükleme
   const selectPersonnel = (userId) => {
     setSelectedUser(userId);
+    setIsPlaybackOpen(false);
+    setIsPlaying(false);
+    setPlaybackIndex(0);
+
     fetch(`${BACKEND_URL}/history/${encodeURIComponent(userId)}`)
       .then((res) => res.json())
       .then((pts) => {
+        setRawHistory(pts);
         setRoutePoints(pts.map((p) => [p.latitude, p.longitude]));
+        // Duraklama ve molaları tespit et
+        const detected = detectStops(pts, 4, 35);
+        setStops(detected);
       })
-      .catch(() => setRoutePoints([]));
+      .catch(() => {
+        setRawHistory([]);
+        setRoutePoints([]);
+        setStops([]);
+      });
 
     fetch(`${BACKEND_URL}/summary/${encodeURIComponent(userId)}`)
       .then((res) => res.json())
@@ -181,7 +363,27 @@ function App() {
       .catch(() => setUserSummary(null));
   };
 
-  // Garantili Excel / CSV İndirme
+  // Rota Oynatma Motoru (Playback Timer)
+  useEffect(() => {
+    if (isPlaying && isPlaybackOpen && rawHistory.length > 0) {
+      playbackTimerRef.current = setInterval(() => {
+        setPlaybackIndex((prev) => {
+          if (prev >= rawHistory.length - 1) {
+            setIsPlaying(false);
+            return prev;
+          }
+          return prev + 1;
+        });
+      }, Math.max(100, Math.round(1000 / playbackSpeed)));
+    } else {
+      if (playbackTimerRef.current) clearInterval(playbackTimerRef.current);
+    }
+    return () => {
+      if (playbackTimerRef.current) clearInterval(playbackTimerRef.current);
+    };
+  }, [isPlaying, isPlaybackOpen, playbackSpeed, rawHistory.length]);
+
+  // CSV İndirme
   const handleDownloadCsv = async (userId) => {
     try {
       const res = await fetch(`${BACKEND_URL}/export-csv/${encodeURIComponent(userId)}`);
@@ -203,6 +405,7 @@ function App() {
     }
   };
 
+  // Çit Ekleme
   const handleAddGeofence = () => {
     const loc = selectedUser && locations[selectedUser] ? locations[selectedUser] : { lat: 41.042, lng: 28.69 };
     fetch(`${BACKEND_URL}/geofences`, {
@@ -222,7 +425,7 @@ function App() {
       });
   };
 
-  // Mesai Ayarlarını Kaydet
+  // Mesai Kaydet
   const handleSaveShiftSettings = () => {
     fetch(`${BACKEND_URL}/shift-settings`, {
       method: 'POST',
@@ -233,7 +436,6 @@ function App() {
       .then((updated) => {
         setShiftSettings(updated);
         setShowShiftModal(false);
-        // Durumu da guncelle
         fetch(`${BACKEND_URL}/shift-status`).then((r) => r.json()).then(setShiftStatus);
       });
   };
@@ -246,32 +448,117 @@ function App() {
     });
   };
 
+  // Oynatma noktasındaki anlık koordinat veya canlı merkez
+  const currentPlaybackPoint =
+    isPlaybackOpen && rawHistory.length > 0 && rawHistory[playbackIndex]
+      ? [rawHistory[playbackIndex].latitude, rawHistory[playbackIndex].longitude]
+      : null;
+
   const center =
-    selectedUser && locations[selectedUser]
+    currentPlaybackPoint ||
+    (selectedUser && locations[selectedUser]
       ? [locations[selectedUser].lat, locations[selectedUser].lng]
       : Object.keys(locations).length > 0
       ? [Object.values(locations)[0].lat, Object.values(locations)[0].lng]
-      : [41.042, 28.69];
+      : [41.042, 28.69]);
 
+  // GİRİŞ EKRANI (Eğer Giriş Yapılmadıysa)
+  if (!isAuthenticated) {
+    return (
+      <div style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        height: '100vh',
+        backgroundColor: '#1e242b',
+        fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif'
+      }}>
+        <div style={{
+          backgroundColor: '#ffffff',
+          borderRadius: '16px',
+          padding: '36px 32px',
+          width: '100%',
+          maxWidth: '380px',
+          boxShadow: '0 12px 36px rgba(0,0,0,0.3)',
+          textAlign: 'center'
+        }}>
+          <div style={{ fontSize: '42px', marginBottom: '12px' }}>🛡️</div>
+          <h2 style={{ margin: '0 0 6px 0', color: '#1c2b22', fontSize: '22px', fontWeight: 'bold' }}>
+            Personel Takip Paneli
+          </h2>
+          <p style={{ margin: '0 0 24px 0', fontSize: '13px', color: '#5f6368' }}>
+            Yönetici Güvenlik Girişi
+          </p>
+
+          <form onSubmit={handleLogin}>
+            <div style={{ textAlign: 'left', marginBottom: '16px' }}>
+              <label style={{ fontSize: '12px', fontWeight: 'bold', color: '#3c4043', display: 'block', marginBottom: '6px' }}>
+                Yönetici Şifresi:
+              </label>
+              <input
+                type="password"
+                placeholder="Şifreyi giriniz"
+                value={inputPassword}
+                onChange={(e) => setInputPassword(e.target.value)}
+                autoFocus
+                style={{
+                  width: '100%',
+                  padding: '12px 14px',
+                  border: authError ? '2px solid #d93025' : '1px solid #dadce0',
+                  borderRadius: '8px',
+                  fontSize: '15px',
+                  boxSizing: 'border-box',
+                  outline: 'none'
+                }}
+              />
+              {authError && (
+                <div style={{ color: '#d93025', fontSize: '12px', marginTop: '6px', fontWeight: '600' }}>
+                  ⚠️ Hatalı şifre, lütfen tekrar deneyin.
+                </div>
+              )}
+            </div>
+
+            <button
+              type="submit"
+              style={{
+                width: '100%',
+                padding: '14px',
+                backgroundColor: '#1a73e8',
+                color: 'white',
+                border: 'none',
+                borderRadius: '8px',
+                fontSize: '15px',
+                fontWeight: 'bold',
+                cursor: 'pointer',
+                transition: '0.2s',
+                boxShadow: '0 2px 6px rgba(26,115,232,0.3)'
+              }}
+            >
+              Giriş Yap
+            </button>
+          </form>
+
+          <div style={{ marginTop: '20px', fontSize: '11px', color: '#80868b' }}>
+            Saha Personel Takip Sistemi &bull; Bulut Yönetim Arayüzü
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // YÖNETİM PANELİ ANA EKRANI
   return (
     <div style={{ display: 'flex', height: '100vh', fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif' }}>
-      {/* Sol Panel */}
-      <div style={{ width: '380px', borderRight: '1px solid #e0e0e0', padding: '16px', overflowY: 'auto', backgroundColor: '#fafafa', display: 'flex', flexDirection: 'column' }}>
+      
+      {/* SOL PANEL (KONTROL MERKEZİ) */}
+      <div style={{ width: '390px', borderRight: '1px solid #e0e0e0', padding: '16px', overflowY: 'auto', backgroundColor: '#fafafa', display: 'flex', flexDirection: 'column' }}>
         
-        {/* Üst Bar */}
+        {/* Üst Bar & Çıkış */}
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
-          <h2 style={{ fontSize: '18px', margin: 0, color: '#202124' }}>Personel Takip</h2>
-          <div style={{ display: 'flex', gap: '6px' }}>
-            <span style={{
-              fontSize: '11px',
-              padding: '3px 8px',
-              borderRadius: '12px',
-              backgroundColor: shiftStatus.inShift ? '#e6f4ea' : '#feefe3',
-              color: shiftStatus.inShift ? '#137333' : '#b06000',
-              fontWeight: 'bold'
-            }}>
-              {shiftStatus.inShift ? '🟢 Mesai İçi' : '⏰ Mesai Dışı'}
-            </span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <h2 style={{ fontSize: '18px', margin: 0, color: '#202124' }}>Personel Takip</h2>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
             <span style={{
               fontSize: '11px',
               padding: '3px 8px',
@@ -282,27 +569,65 @@ function App() {
             }}>
               {isConnected ? '● Bağlı' : '○ Bağlantı Yok'}
             </span>
+            <button
+              onClick={handleLogout}
+              title="Güvenli Çıkış"
+              style={{
+                fontSize: '11px',
+                padding: '4px 8px',
+                backgroundColor: '#f1f3f4',
+                color: '#d93025',
+                border: '1px solid #dadce0',
+                borderRadius: '6px',
+                fontWeight: 'bold',
+                cursor: 'pointer'
+              }}
+            >
+              Çıkış
+            </button>
           </div>
         </div>
 
-        {/* Mesai Durum Bilgisi */}
-        {!shiftStatus.inShift && (
-          <div style={{ backgroundColor: '#feefe3', border: '1px solid #fedfc8', borderRadius: '6px', padding: '8px 10px', fontSize: '11px', color: '#b06000', marginBottom: '10px' }}>
-            <strong>Bilgi:</strong> Şu an mesai dışı / izinli zaman dilimindeyiz. Personel takip kuralları devrede.
+        {/* Mesai ve Hız Sınırı Rozetleri */}
+        <div style={{ display: 'flex', gap: '6px', marginBottom: '10px' }}>
+          <span style={{
+            flex: 1,
+            textAlign: 'center',
+            fontSize: '11px',
+            padding: '5px',
+            borderRadius: '6px',
+            backgroundColor: shiftStatus.inShift ? '#e6f4ea' : '#feefe3',
+            color: shiftStatus.inShift ? '#137333' : '#b06000',
+            fontWeight: 'bold'
+          }}>
+            {shiftStatus.inShift ? '🟢 Mesai İçi' : '⏰ Mesai Dışı'}
+          </span>
+          <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '4px', backgroundColor: '#f8f9fa', border: '1px solid #dadce0', borderRadius: '6px', padding: '4px', fontSize: '11px' }}>
+            <span>⚡ Hız Limiti:</span>
+            <input
+              type="number"
+              value={speedLimit}
+              onChange={(e) => setSpeedLimit(Number(e.target.value) || 50)}
+              style={{ width: '42px', padding: '2px 4px', fontSize: '11px', fontWeight: 'bold', border: '1px solid #ccc', borderRadius: '4px', textAlign: 'center' }}
+            />
+            <span>km/s</span>
           </div>
-        )}
+        </div>
 
-        {/* Coğrafi Çit Alarmları */}
+        {/* Alarmlar (Hız Aşımı ve Çit İhlali) */}
         {alerts.length > 0 && (
-          <div style={{ backgroundColor: '#fce8e6', border: '1px solid #fad2cf', borderRadius: '6px', padding: '8px 12px', marginBottom: '12px', fontSize: '12px', color: '#c5221f' }}>
-            <strong>Bölge İhlali Uyarısı:</strong>
+          <div style={{ backgroundColor: '#fce8e6', border: '1px solid #fad2cf', borderRadius: '8px', padding: '8px 12px', marginBottom: '12px', fontSize: '12px', color: '#c5221f' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
+              <strong>⚠️ Canlı İkazlar ({alerts.length}):</strong>
+              <button onClick={() => setAlerts([])} style={{ border: 'none', background: 'none', color: '#999', cursor: 'pointer', fontSize: '11px' }}>Temizle</button>
+            </div>
             {alerts.map((alt, i) => (
-              <div key={i} style={{ marginTop: '2px' }}>{alt}</div>
+              <div key={i} style={{ marginTop: '2px', fontWeight: '500' }}>{alt}</div>
             ))}
           </div>
         )}
 
-        {/* Aksiyon Butonları (3'lü Grid) */}
+        {/* Aksiyon Butonları (Grid) */}
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '6px', marginBottom: '14px' }}>
           <button
             onClick={() => setShowQr(true)}
@@ -334,8 +659,14 @@ function App() {
               </span>
             </div>
 
-            <div style={{ fontSize: '13px', marginTop: '6px', fontWeight: '600', color: getSpeedBadge(locations[selectedUser].speed).color }}>
-              {getSpeedBadge(locations[selectedUser].speed).icon} {getSpeedBadge(locations[selectedUser].speed).label}
+            <div style={{
+              fontSize: '13px',
+              marginTop: '6px',
+              fontWeight: '600',
+              color: locations[selectedUser].speed > speedLimit ? '#d93025' : getSpeedBadge(locations[selectedUser].speed).color
+            }}>
+              {locations[selectedUser].speed > speedLimit ? '⚡ AŞIRI HIZ: ' : getSpeedBadge(locations[selectedUser].speed).icon + ' '}
+              {getSpeedBadge(locations[selectedUser].speed).label}
             </div>
 
             {userSummary && (
@@ -345,24 +676,48 @@ function App() {
               </div>
             )}
 
-            {/* Rota ve Garantili Excel İndirme */}
-            <div style={{ display: 'flex', gap: '8px', marginTop: '10px' }}>
+            {/* Rota, Mola ve Zaman Tüneli Butonları */}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px', marginTop: '10px' }}>
               <button
                 onClick={() => setShowRoute(!showRoute)}
-                style={{ flex: 1, padding: '8px 4px', backgroundColor: showRoute ? '#1a73e8' : '#dadce0', color: showRoute ? '#fff' : '#333', border: 'none', borderRadius: '4px', fontSize: '11px', fontWeight: 'bold', cursor: 'pointer' }}
+                style={{ padding: '8px 4px', backgroundColor: showRoute ? '#1a73e8' : '#dadce0', color: showRoute ? '#fff' : '#333', border: 'none', borderRadius: '4px', fontSize: '11px', fontWeight: 'bold', cursor: 'pointer' }}
               >
                 {showRoute ? '✓ Rota Açık' : 'Rotayı Göster'}
               </button>
               <button
-                onClick={() => handleDownloadCsv(selectedUser)}
-                style={{ flex: 1, padding: '8px 4px', backgroundColor: '#137333', color: '#fff', border: 'none', borderRadius: '4px', fontSize: '11px', fontWeight: 'bold', cursor: 'pointer' }}
+                onClick={() => setShowStops(!showStops)}
+                style={{ padding: '8px 4px', backgroundColor: showStops ? '#f2994a' : '#dadce0', color: showStops ? '#fff' : '#333', border: 'none', borderRadius: '4px', fontSize: '11px', fontWeight: 'bold', cursor: 'pointer' }}
               >
-                📥 Excel / CSV İndir
+                {showStops ? `✓ Molalar (${stops.length})` : `Molaları Göster (${stops.length})`}
+              </button>
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px', marginTop: '6px' }}>
+              <button
+                onClick={() => {
+                  if (rawHistory.length === 0) {
+                    alert('Bu personel için henüz kaydedilmiş rota bulunmuyor.');
+                    return;
+                  }
+                  setIsPlaybackOpen(true);
+                  setPlaybackIndex(0);
+                  setIsPlaying(true);
+                }}
+                style={{ padding: '8px 4px', backgroundColor: '#673ab7', color: '#fff', border: 'none', borderRadius: '4px', fontSize: '11px', fontWeight: 'bold', cursor: 'pointer' }}
+              >
+                🎬 Rota Canlandır
+              </button>
+              <button
+                onClick={() => handleDownloadCsv(selectedUser)}
+                style={{ padding: '8px 4px', backgroundColor: '#137333', color: '#fff', border: 'none', borderRadius: '4px', fontSize: '11px', fontWeight: 'bold', cursor: 'pointer' }}
+              >
+                📥 Excel / CSV
               </button>
             </div>
           </div>
         )}
 
+        {/* Personel Listesi */}
         <h3 style={{ fontSize: '12px', color: '#5f6368', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '8px' }}>
           Personel Listesi ({Object.keys(locations).length})
         </h3>
@@ -371,21 +726,27 @@ function App() {
           <p style={{ color: '#888', fontSize: '13px' }}>Henüz aktif personel konumu yok.</p>
         )}
 
-        {/* Personel Kartları */}
         {Object.entries(locations).map(([userId, loc]) => {
           const online = isOnline(loc.timestamp);
           const speedInfo = getSpeedBadge(loc.speed);
+          const isSpeeding = loc.speed > speedLimit;
+
           return (
             <div
               key={userId}
               onClick={() => selectPersonnel(userId)}
+              className={isSpeeding ? 'speed-alert' : ''}
               style={{
                 marginBottom: '8px',
                 padding: '10px 12px',
-                border: selectedUser === userId ? '2px solid #1a73e8' : '1px solid #dadce0',
+                border: isSpeeding
+                  ? '2px solid #d93025'
+                  : selectedUser === userId
+                  ? '2px solid #1a73e8'
+                  : '1px solid #dadce0',
                 borderRadius: '8px',
                 cursor: 'pointer',
-                backgroundColor: selectedUser === userId ? '#e8f0fe' : '#ffffff',
+                backgroundColor: isSpeeding ? '#fce8e6' : selectedUser === userId ? '#e8f0fe' : '#ffffff',
                 transition: '0.2s'
               }}
             >
@@ -394,13 +755,15 @@ function App() {
                   <span style={{ height: '8px', width: '8px', borderRadius: '50%', backgroundColor: online ? '#1e8e3e' : '#80868b' }}></span>
                   <strong style={{ fontSize: '14px', color: '#202124' }}>{userId}</strong>
                 </div>
-                <small style={{ fontSize: '11px', color: online ? '#1e8e3e' : '#80868b', fontWeight: 'bold' }}>
-                  {online ? 'Çevrim içi' : 'Çevrimdışı'}
+                <small style={{ fontSize: '11px', color: isSpeeding ? '#d93025' : online ? '#1e8e3e' : '#80868b', fontWeight: 'bold' }}>
+                  {isSpeeding ? '⚡ HIZ AŞIMI' : online ? 'Çevrim içi' : 'Çevrimdışı'}
                 </small>
               </div>
 
               <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '6px', fontSize: '12px', color: '#5f6368' }}>
-                <span>{speedInfo.icon} {speedInfo.label}</span>
+                <span style={{ fontWeight: isSpeeding ? 'bold' : 'normal', color: isSpeeding ? '#d93025' : speedInfo.color }}>
+                  {speedInfo.icon} {Math.round(loc.speed)} km/s
+                </span>
                 <span>🔋 %{loc.battery || 100}</span>
               </div>
 
@@ -412,15 +775,156 @@ function App() {
         })}
       </div>
 
-      {/* Harita */}
+      {/* SAĞ PANEL: HARİTA & OVERLAY'LER */}
       <div style={{ flex: 1, position: 'relative' }}>
+        
+        {/* Harita Katman Değiştirici (Sağ Üst) */}
+        <div style={{
+          position: 'absolute',
+          top: '12px',
+          right: '12px',
+          zIndex: 1000,
+          backgroundColor: 'white',
+          borderRadius: '8px',
+          padding: '4px',
+          boxShadow: '0 2px 8px rgba(0,0,0,0.2)',
+          display: 'flex',
+          gap: '4px'
+        }}>
+          {Object.entries(MAP_LAYERS).map(([key, layer]) => (
+            <button
+              key={key}
+              onClick={() => setCurrentLayer(key)}
+              style={{
+                padding: '6px 10px',
+                border: 'none',
+                borderRadius: '6px',
+                fontSize: '12px',
+                fontWeight: 'bold',
+                cursor: 'pointer',
+                backgroundColor: currentLayer === key ? '#1a73e8' : 'transparent',
+                color: currentLayer === key ? '#ffffff' : '#3c4043',
+                transition: '0.2s'
+              }}
+            >
+              {layer.name}
+            </button>
+          ))}
+        </div>
+
+        {/* ZAMAN TÜNELİ / ROTA OYNATICI (Alt Bar) */}
+        {isPlaybackOpen && rawHistory.length > 0 && (
+          <div style={{
+            position: 'absolute',
+            bottom: '24px',
+            left: '50%',
+            transform: 'translateX(-50%)',
+            zIndex: 1000,
+            backgroundColor: '#ffffff',
+            borderRadius: '12px',
+            padding: '14px 20px',
+            boxShadow: '0 4px 20px rgba(0,0,0,0.3)',
+            width: '90%',
+            maxWidth: '680px',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '8px'
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <span style={{ fontSize: '13px', fontWeight: 'bold', color: '#1a73e8' }}>
+                  🎬 Rota Canlandırma: {selectedUser}
+                </span>
+                <span style={{ fontSize: '12px', color: '#5f6368', backgroundColor: '#f1f3f4', padding: '2px 8px', borderRadius: '10px' }}>
+                  🕒 {rawHistory[playbackIndex]?.timestamp ? new Date(rawHistory[playbackIndex].timestamp).toLocaleTimeString() : '-'}
+                </span>
+                <span style={{ fontSize: '12px', color: '#5f6368', backgroundColor: '#f1f3f4', padding: '2px 8px', borderRadius: '10px' }}>
+                  🚗 {Math.round(rawHistory[playbackIndex]?.speed || 0)} km/s
+                </span>
+              </div>
+
+              <button
+                onClick={() => { setIsPlaybackOpen(false); setIsPlaying(false); }}
+                style={{ border: 'none', background: 'none', fontSize: '16px', color: '#888', cursor: 'pointer', fontWeight: 'bold' }}
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Zaman Çubuğu (Slider) */}
+            <input
+              type="range"
+              min="0"
+              max={rawHistory.length - 1}
+              value={playbackIndex}
+              onChange={(e) => setPlaybackIndex(Number(e.target.value))}
+              style={{ width: '100%', cursor: 'pointer' }}
+            />
+
+            {/* Oynatma Kontrolleri */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '2px' }}>
+              <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                <button
+                  onClick={() => setPlaybackIndex(0)}
+                  title="Başa Sar"
+                  style={{ padding: '6px 12px', backgroundColor: '#f1f3f4', border: '1px solid #ccc', borderRadius: '6px', cursor: 'pointer', fontSize: '12px' }}
+                >
+                  ⏮ Başa Sar
+                </button>
+                <button
+                  onClick={() => setIsPlaying(!isPlaying)}
+                  style={{
+                    padding: '6px 16px',
+                    backgroundColor: isPlaying ? '#d93025' : '#1e8e3e',
+                    color: 'white',
+                    border: 'none',
+                    borderRadius: '6px',
+                    fontWeight: 'bold',
+                    cursor: 'pointer',
+                    fontSize: '12px'
+                  }}
+                >
+                  {isPlaying ? '⏸ Duraklat' : '▶ Oynat'}
+                </button>
+              </div>
+
+              {/* Hız Seçenekleri */}
+              <div style={{ display: 'flex', gap: '4px', alignItems: 'center' }}>
+                <span style={{ fontSize: '11px', color: '#888', marginRight: '4px' }}>Hız:</span>
+                {[1, 2, 5, 10].map((spd) => (
+                  <button
+                    key={spd}
+                    onClick={() => setPlaybackSpeed(spd)}
+                    style={{
+                      padding: '4px 8px',
+                      borderRadius: '4px',
+                      border: '1px solid ' + (playbackSpeed === spd ? '#1a73e8' : '#dadce0'),
+                      backgroundColor: playbackSpeed === spd ? '#e8f0fe' : '#ffffff',
+                      color: playbackSpeed === spd ? '#1a73e8' : '#5f6368',
+                      fontSize: '11px',
+                      fontWeight: 'bold',
+                      cursor: 'pointer'
+                    }}
+                  >
+                    {spd}x
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* HARİTA BİLEŞENİ */}
         <MapContainer center={center} zoom={14} style={{ height: '100%', width: '100%' }}>
           <MapController center={center} zoom={15} />
+          
           <TileLayer
-            attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
-            url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+            key={currentLayer}
+            attribution={MAP_LAYERS[currentLayer].attribution}
+            url={MAP_LAYERS[currentLayer].url}
           />
 
+          {/* Coğrafi Çit Çemberleri */}
           {geofences.map((fence) => (
             <Circle
               key={fence.id}
@@ -435,6 +939,7 @@ function App() {
             </Circle>
           ))}
 
+          {/* Rota Çizgisi (Polyline) */}
           {showRoute && routePoints.length > 1 && (
             <Polyline
               positions={routePoints}
@@ -442,7 +947,34 @@ function App() {
             />
           )}
 
-          {Object.entries(locations).map(([userId, loc]) => (
+          {/* Duraklama ve Mola Noktaları (P Marker'ları) */}
+          {showStops && stops.map((st, idx) => (
+            <Marker key={idx} position={[st.lat, st.lng]} icon={stopIcon}>
+              <Popup>
+                <div style={{ fontSize: '13px' }}>
+                  <strong style={{ color: '#f2994a' }}>🅿️ Duraklama / Mola</strong><br />
+                  <strong>Süre:</strong> {st.durationMinutes} Dakika<br />
+                  <strong>Giriş:</strong> {new Date(st.startTime).toLocaleTimeString()}<br />
+                  <strong>Çıkış:</strong> {new Date(st.endTime).toLocaleTimeString()}
+                </div>
+              </Popup>
+            </Marker>
+          ))}
+
+          {/* Oynatıcı Hareketli Araç Marker'ı */}
+          {isPlaybackOpen && currentPlaybackPoint && (
+            <Marker position={currentPlaybackPoint} icon={playbackVehicleIcon}>
+              <Popup>
+                <strong>{selectedUser} (Canlandırma)</strong><br />
+                Saat: {new Date(rawHistory[playbackIndex].timestamp).toLocaleTimeString()}<br />
+                Hız: {Math.round(rawHistory[playbackIndex].speed || 0)} km/s<br />
+                Pil: %{rawHistory[playbackIndex].battery || 100}
+              </Popup>
+            </Marker>
+          )}
+
+          {/* Canlı Personel Konum Marker'ları */}
+          {!isPlaybackOpen && Object.entries(locations).map(([userId, loc]) => (
             <Marker
               key={userId}
               position={[loc.lat, loc.lng]}
@@ -451,6 +983,7 @@ function App() {
               <Popup>
                 <strong>{userId}</strong><br />
                 Durum: {getSpeedBadge(loc.speed).label}<br />
+                Hız: {Math.round(loc.speed)} km/s<br />
                 Pil: %{loc.battery || 100}<br />
                 Saat: {loc.timestamp ? new Date(loc.timestamp).toLocaleTimeString() : '-'}
               </Popup>
@@ -459,7 +992,7 @@ function App() {
         </MapContainer>
       </div>
 
-      {/* QR Modal */}
+      {/* QR MODAL */}
       {showQr && (
         <div style={{ position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', backgroundColor: 'rgba(0,0,0,0.5)', zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
           <div style={{ backgroundColor: 'white', padding: '24px', borderRadius: '12px', textAlign: 'center', maxWidth: '360px', boxShadow: '0 4px 20px rgba(0,0,0,0.2)' }}>
@@ -476,7 +1009,7 @@ function App() {
         </div>
       )}
 
-      {/* Mesai ve İzin Ayarları Modalı */}
+      {/* MESAİ & İZİN MODAL */}
       {showShiftModal && (
         <div style={{ position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', backgroundColor: 'rgba(0,0,0,0.5)', zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
           <div style={{ backgroundColor: 'white', padding: '24px', borderRadius: '12px', width: '380px', boxShadow: '0 4px 20px rgba(0,0,0,0.2)' }}>
@@ -542,7 +1075,7 @@ function App() {
                 style={{ width: '18px', height: '18px', cursor: 'pointer' }}
               />
               <label htmlFor="block-check" style={{ fontSize: '12px', color: '#202124', cursor: 'pointer' }}>
-                <strong>İzinli günlerde ve mesai dışında takibi tamamen durdur</strong> (Personel gizliliği ve batarya koruma)
+                <strong>İzinli günlerde ve mesai dışında takibi tamamen durdur</strong>
               </label>
             </div>
 
@@ -564,7 +1097,7 @@ function App() {
         </div>
       )}
 
-      {/* Geofence Modal */}
+      {/* ÇİT ALANI EKLEME MODAL */}
       {showFenceModal && (
         <div style={{ position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', backgroundColor: 'rgba(0,0,0,0.5)', zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
           <div style={{ backgroundColor: 'white', padding: '24px', borderRadius: '12px', width: '320px', boxShadow: '0 4px 20px rgba(0,0,0,0.2)' }}>
@@ -593,8 +1126,7 @@ function App() {
           </div>
         </div>
       )}
+
     </div>
   );
 }
-
-export default App;

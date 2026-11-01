@@ -1,2 +1,22 @@
 body { margin: 0; padding: 0; font-family: sans-serif; }
 #root { height: 100vh; }
+
+@keyframes pulseAlert {
+  0% { transform: scale(1); box-shadow: 0 0 0 0 rgba(217, 48, 37, 0.7); }
+  70% { transform: scale(1.05); box-shadow: 0 0 0 8px rgba(217, 48, 37, 0); }
+  100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(217, 48, 37, 0); }
+}
+
+.speed-alert {
+  animation: pulseAlert 1.2s infinite;
+}
+
+@keyframes pulseVehicle {
+  0% { transform: scale(1); }
+  50% { transform: scale(1.2); }
+  100% { transform: scale(1); }
+}
+
+.playback-marker {
+  animation: pulseVehicle 0.8s infinite;
+}
