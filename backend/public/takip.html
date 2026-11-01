@@ -176,53 +176,49 @@
       });
     }
 
-    // SOS / Panik Butonu
+    // SOS / Panik Butonu (Garantili Çift Kanallı İletim)
     function triggerSos() {
-      const userId = userIdInput.value.trim() || 'Saha_Personeli';
+      const userId = userIdInput.value.trim() || 'Saha_Personeli_1';
       if (!confirm(`🚨 DİKKAT!\n\nMerkeze ve yöneticilere ACİL DURUM (SOS) çağrısı gönderilsin mi?`)) {
         return;
       }
 
+      function doSendSos(lat, lon, speed) {
+        const payload = {
+          userId: userId,
+          latitude: lat,
+          longitude: lon,
+          speed: speed || 0,
+          battery: currentBattery,
+          timestamp: new Date().toISOString()
+        };
+
+        if (socket && socket.connected) {
+          socket.emit('sosAlert', payload);
+        }
+
+        fetch('/sos', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        }).then(() => {
+          alert(`🚨 ACİL DURUM BİLDİRİLDİ!\n\nKonumunuz (${lat.toFixed(5)}, ${lon.toFixed(5)}) siren ile yönetici ekranına iletildi.`);
+          statusMsgSpan.textContent = '🚨 SOS ÇAĞRISI AKTİF!';
+        }).catch(e => {
+          alert('SOS iletim hatası: ' + e.message);
+        });
+      }
+
       navigator.geolocation.getCurrentPosition(
         (pos) => {
-          const lat = pos.coords.latitude;
-          const lon = pos.coords.longitude;
-          const payload = {
-            userId: userId,
-            latitude: lat,
-            longitude: lon,
-            speed: Math.round((pos.coords.speed || 0) * 3.6),
-            battery: currentBattery,
-            timestamp: new Date().toISOString()
-          };
-
-          if (socket && socket.connected) {
-            socket.emit('sosAlert', payload);
-          }
-
-          fetch('/sos', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-          }).then(() => {
-            alert(`🚨 ACİL DURUM BİLDİRİLDİ!\n\nKonumunuz (${lat.toFixed(5)}, ${lon.toFixed(5)}) siren ile yönetici ekranına iletildi.`);
-            statusMsgSpan.textContent = '🚨 SOS ÇAĞRISI AKTİF!';
-          }).catch(e => {
-            alert('SOS iletim hatası: ' + e.message);
-          });
+          doSendSos(pos.coords.latitude, pos.coords.longitude, Math.round((pos.coords.speed || 0) * 3.6));
         },
         () => {
-          // GPS alınamazsa son bilinenle gönder
-          const lat = lastSentLat || 41.042;
-          const lon = lastSentLon || 28.69;
-          fetch('/sos', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ userId, latitude: lat, longitude: lon, battery: currentBattery })
-          });
-          alert('🚨 SOS iletildi (Son bilinen koordinat)');
+          const lat = lastSentLat || 41.04239;
+          const lon = lastSentLon || 28.68986;
+          doSendSos(lat, lon, 0);
         },
-        { enableHighAccuracy: true, timeout: 5000 }
+        { enableHighAccuracy: true, timeout: 3500 }
       );
     }
 

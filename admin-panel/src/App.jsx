@@ -28,7 +28,9 @@ const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || defaultBackend;
 
 const socket = io(BACKEND_URL, {
   autoConnect: true,
-  transports: ['websocket', 'polling'],
+  transports: ['polling', 'websocket'],
+  reconnection: true,
+  reconnectionDelay: 1000,
   extraHeaders: {
     'ngrok-skip-browser-warning': 'true',
     'Bypass-Tunnel-Reminder': 'true'
@@ -89,7 +91,7 @@ function calculateDistanceMeters(lat1, lon1, lat2, lon2) {
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-// Duraklama ve Mola Noktalarını Tespit Et (Minimum 4 dk ve 35m yarıçap)
+// Duraklama ve Mola Noktalarını Tespit Et
 function detectStops(pts, minMinutes = 4, maxDistMeters = 35) {
   if (!pts || pts.length < 2) return [];
   const stops = [];
@@ -190,7 +192,6 @@ const MAP_LAYERS = {
   }
 };
 
-// Duraklama Marker İkonu
 const stopIcon = L.divIcon({
   className: 'stop-icon',
   html: `<div style="background-color: #f2994a; color: white; width: 26px; height: 26px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: bold; border: 2px solid white; box-shadow: 0 2px 6px rgba(0,0,0,0.35); font-size: 13px;">P</div>`,
@@ -198,7 +199,6 @@ const stopIcon = L.divIcon({
   iconAnchor: [13, 13]
 });
 
-// Canlandırma Hareketli Araç İkonu
 const playbackVehicleIcon = L.divIcon({
   className: 'playback-marker',
   html: `<div style="background-color: #1a73e8; color: white; width: 34px; height: 34px; border-radius: 50%; display: flex; align-items: center; justify-content: center; border: 3px solid white; box-shadow: 0 3px 10px rgba(0,0,0,0.4); font-size: 18px;">🚗</div>`,
@@ -206,7 +206,6 @@ const playbackVehicleIcon = L.divIcon({
   iconAnchor: [17, 17]
 });
 
-// SOS Acil Durum İkonu
 const sosMarkerIcon = L.divIcon({
   className: 'speed-alert',
   html: `<div style="background-color: #d93025; color: white; width: 38px; height: 38px; border-radius: 50%; display: flex; align-items: center; justify-content: center; border: 3px solid white; box-shadow: 0 0 15px rgba(217,48,37,0.9); font-size: 20px;">🚨</div>`,
@@ -317,7 +316,59 @@ export default function App() {
       .catch(() => setUserSummary(null));
   };
 
-  // Soket ve Veri Dinleyicileri
+  // Personel Seçimi
+  const selectPersonnel = (userId) => {
+    setSelectedUser(userId);
+    loadPersonnelHistory(userId, selectedDate);
+  };
+
+  // SOS Sustur ve Kapat
+  const dismissSos = () => {
+    setSosModalData(null);
+    fetch(`${BACKEND_URL}/api/sos`, { method: 'DELETE' }).catch(() => {});
+  };
+
+  // 1. Arka Planda Sürekli Bağlantı & SOS Kontrol Döngüsü
+  useEffect(() => {
+    if (!isAuthenticated) return;
+
+    const syncStatus = () => {
+      setIsConnected(socket.connected);
+      if (!socket.connected) socket.connect();
+
+      // SOS REST Polling: Soket kaçırılsa dahi merkeze gelen çağrıyı yakala
+      fetch(`${BACKEND_URL}/api/sos`)
+        .then((r) => r.json())
+        .then((sos) => {
+          if (sos && sos.userId) {
+            setSosModalData((prev) => {
+              if (!prev || prev.timestamp !== sos.timestamp) {
+                playSiren();
+                return sos;
+              }
+              return prev;
+            });
+            setLocations((prev) => ({
+              ...prev,
+              [sos.userId]: {
+                lat: sos.latitude,
+                lng: sos.longitude,
+                speed: sos.speed || 0,
+                battery: sos.battery || 100,
+                timestamp: sos.timestamp
+              }
+            }));
+          }
+        })
+        .catch(() => {});
+    };
+
+    syncStatus();
+    const interval = setInterval(syncStatus, 2500);
+    return () => clearInterval(interval);
+  }, [isAuthenticated]);
+
+  // 2. Soket Dinleyicileri
   useEffect(() => {
     if (!isAuthenticated) return;
 
@@ -337,6 +388,13 @@ export default function App() {
         };
       });
       setLocations(formatted);
+
+      // İlk personeli otomatik seç
+      const keys = Object.keys(formatted);
+      if (keys.length > 0) {
+        setSelectedUser((prev) => prev || keys[0]);
+        loadPersonnelHistory(keys[0], selectedDate);
+      }
     };
 
     const handleLocationUpdate = (data) => {
@@ -360,7 +418,7 @@ export default function App() {
         }
       }));
 
-      // Eğer seçili gün bugünün tarihiyse rotayı canlı uzat
+      // Eğer seçili personel ve bugünün tarihiyse canlı rotayı uzat
       const todayStr = new Date().toISOString().slice(0, 10);
       if (selectedUser === data.userId && selectedDate === todayStr) {
         setRoutePoints((prev) => [...prev, [data.latitude, data.longitude]]);
@@ -374,10 +432,20 @@ export default function App() {
       setAlerts((prev) => [msg, ...prev.slice(0, 4)]);
     };
 
-    // SOS Çağrısı Geldiğinde Siren Çal ve Modalı Aç
     const handleSosAlert = (sosData) => {
       playSiren();
       setSosModalData(sosData);
+      setLocations((prev) => ({
+        ...prev,
+        [sosData.userId]: {
+          lat: sosData.latitude,
+          lng: sosData.longitude,
+          speed: sosData.speed || 0,
+          battery: sosData.battery || 100,
+          timestamp: sosData.timestamp
+        }
+      }));
+      setSelectedUser(sosData.userId);
       const msg = `🚨 ACİL DURUM (SOS): ${sosData.userId} YARDIM ÇAĞRISI GÖNDERDİ!`;
       setAlerts((prev) => [msg, ...prev]);
     };
@@ -391,6 +459,7 @@ export default function App() {
     socket.on('locationUpdate', handleLocationUpdate);
     socket.on('geofenceAlert', handleGeofenceAlert);
     socket.on('sosAlert', handleSosAlert);
+    socket.on('sosCleared', () => setSosModalData(null));
     socket.on('geofencesUpdate', handleGeofencesUpdate);
     socket.on('shiftSettingsUpdate', handleShiftSettingsUpdate);
 
@@ -406,16 +475,11 @@ export default function App() {
       socket.off('locationUpdate', handleLocationUpdate);
       socket.off('geofenceAlert', handleGeofenceAlert);
       socket.off('sosAlert', handleSosAlert);
+      socket.off('sosCleared');
       socket.off('geofencesUpdate', handleGeofencesUpdate);
       socket.off('shiftSettingsUpdate', handleShiftSettingsUpdate);
     };
   }, [selectedUser, selectedDate, speedLimit, isAuthenticated]);
-
-  // Personel Seçimi
-  const selectPersonnel = (userId) => {
-    setSelectedUser(userId);
-    loadPersonnelHistory(userId, selectedDate);
-  };
 
   // Rota Oynatma Motoru (Playback Timer)
   useEffect(() => {
@@ -437,7 +501,7 @@ export default function App() {
     };
   }, [isPlaying, isPlaybackOpen, playbackSpeed, rawHistory.length]);
 
-  // CSV İndirme (Tarih Filtreli)
+  // CSV İndirme
   const handleDownloadCsv = async (userId) => {
     try {
       const res = await fetch(`${BACKEND_URL}/export-csv/${encodeURIComponent(userId)}?date=${encodeURIComponent(selectedDate)}`);
@@ -514,7 +578,7 @@ export default function App() {
       ? [locations[selectedUser].lat, locations[selectedUser].lng]
       : Object.keys(locations).length > 0
       ? [Object.values(locations)[0].lat, Object.values(locations)[0].lng]
-      : [41.042, 28.69]);
+      : [41.04239, 28.68986]);
 
   // GİRİŞ EKRANI (Eğer Giriş Yapılmadıysa)
   if (!isAuthenticated) {
@@ -605,7 +669,7 @@ export default function App() {
     <div style={{ display: 'flex', height: '100vh', fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif' }}>
       
       {/* SOL PANEL (KONTROL MERKEZİ) */}
-      <div style={{ width: '390px', borderRight: '1px solid #e0e0e0', padding: '16px', overflowY: 'auto', backgroundColor: '#fafafa', display: 'flex', flexDirection: 'column' }}>
+      <div style={{ width: '400px', borderRight: '1px solid #e0e0e0', padding: '16px', overflowY: 'auto', backgroundColor: '#fafafa', display: 'flex', flexDirection: 'column' }}>
         
         {/* Üst Bar & Çıkış */}
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
@@ -668,7 +732,7 @@ export default function App() {
           </div>
         </div>
 
-        {/* Alarmlar (Hız Aşımı ve Çit İhlali) */}
+        {/* Alarmlar (Hız Aşımı, Çit İhlali ve SOS) */}
         {alerts.length > 0 && (
           <div style={{ backgroundColor: '#fce8e6', border: '1px solid #fad2cf', borderRadius: '8px', padding: '8px 12px', marginBottom: '12px', fontSize: '12px', color: '#c5221f' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
@@ -703,13 +767,13 @@ export default function App() {
           </button>
         </div>
 
-        {/* Seçili Personel Detay Kartı */}
-        {selectedUser && locations[selectedUser] && (
+        {/* PERSONEL DETAY KARTI (Tarih Seçici, PDF Karne, Canlandırma) */}
+        {selectedUser ? (
           <div style={{ backgroundColor: '#e8f0fe', border: '1px solid #d2e3fc', borderRadius: '8px', padding: '12px', marginBottom: '16px' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <strong style={{ fontSize: '16px', color: '#1a73e8' }}>{selectedUser}</strong>
               <span style={{ fontSize: '12px', fontWeight: 'bold', color: '#5f6368' }}>
-                🔋 %{locations[selectedUser].battery || 100}
+                🔋 %{(locations[selectedUser] && locations[selectedUser].battery) || 100}
               </span>
             </div>
 
@@ -717,10 +781,10 @@ export default function App() {
               fontSize: '13px',
               marginTop: '6px',
               fontWeight: '600',
-              color: locations[selectedUser].speed > speedLimit ? '#d93025' : getSpeedBadge(locations[selectedUser].speed).color
+              color: locations[selectedUser] && locations[selectedUser].speed > speedLimit ? '#d93025' : getSpeedBadge((locations[selectedUser] && locations[selectedUser].speed) || 0).color
             }}>
-              {locations[selectedUser].speed > speedLimit ? '⚡ AŞIRI HIZ: ' : getSpeedBadge(locations[selectedUser].speed).icon + ' '}
-              {getSpeedBadge(locations[selectedUser].speed).label}
+              {locations[selectedUser] && locations[selectedUser].speed > speedLimit ? '⚡ AŞIRI HIZ: ' : getSpeedBadge((locations[selectedUser] && locations[selectedUser].speed) || 0).icon + ' '}
+              {getSpeedBadge((locations[selectedUser] && locations[selectedUser].speed) || 0).label}
             </div>
 
             {/* Tarih Seçici (Date Picker) */}
@@ -760,7 +824,7 @@ export default function App() {
               </button>
             </div>
 
-            {/* Canlandırıcı & Raporlama Butonları (Grid) */}
+            {/* Canlandırıcı, Excel ve PDF Karne Butonları (Grid) */}
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '4px', marginTop: '6px' }}>
               <button
                 onClick={() => {
@@ -790,6 +854,27 @@ export default function App() {
               </button>
             </div>
           </div>
+        ) : (
+          <div style={{ backgroundColor: '#fff', border: '1px dashed #dadce0', borderRadius: '8px', padding: '16px', marginBottom: '16px', textAlign: 'center' }}>
+            <div style={{ fontSize: '26px', marginBottom: '6px' }}>📍</div>
+            <strong style={{ fontSize: '13px', color: '#202124', display: 'block', marginBottom: '4px' }}>Personel Seçilmedi</strong>
+            <p style={{ fontSize: '11px', color: '#666', margin: '0 0 10px 0', lineHeight: '1.4' }}>
+              Aşağıdaki listeden personeli seçebilir veya hemen test etmek için örnek personeli yükleyebilirsiniz.
+            </p>
+            <button
+              onClick={() => {
+                const demoUser = 'Personel_1';
+                setLocations(prev => ({
+                  ...prev,
+                  [demoUser]: { lat: 41.04239, lng: 28.68986, speed: 35, battery: 90, timestamp: new Date().toISOString() }
+                }));
+                selectPersonnel(demoUser);
+              }}
+              style={{ padding: '8px 14px', backgroundColor: '#e8f0fe', color: '#1a73e8', border: '1px solid #d2e3fc', borderRadius: '6px', fontSize: '12px', fontWeight: 'bold', cursor: 'pointer' }}
+            >
+              + Örnek Personeli Yükle & Test Et
+            </button>
+          </div>
         )}
 
         {/* Personel Listesi */}
@@ -798,7 +883,9 @@ export default function App() {
         </h3>
 
         {Object.keys(locations).length === 0 && (
-          <p style={{ color: '#888', fontSize: '13px' }}>Henüz aktif personel konumu yok.</p>
+          <div style={{ color: '#888', fontSize: '12px', padding: '10px 0' }}>
+            Henüz aktif personel sinyali yok. Mobilden <code>/takip.html</code> adresine girip takibi veya test konumunu başlatın.
+          </div>
         )}
 
         {Object.entries(locations).map(([userId, loc]) => {
@@ -1081,7 +1168,7 @@ export default function App() {
         </MapContainer>
       </div>
 
-      {/* SOS ACİL DURUM BİLDİRİM MODALI */}
+      {/* SOS ACİL DURUM BİLDİRİM MODALI (CANLI SİREN VE ANLIK UYARI) */}
       {sosModalData && (
         <div style={{
           position: 'fixed',
@@ -1131,7 +1218,7 @@ export default function App() {
                 Haritada Odaklan
               </button>
               <button
-                onClick={() => setSosModalData(null)}
+                onClick={dismissSos}
                 style={{ padding: '12px 20px', backgroundColor: '#d93025', color: 'white', border: 'none', borderRadius: '8px', fontWeight: 'bold', cursor: 'pointer' }}
               >
                 Sustur & Kapat

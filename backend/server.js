@@ -144,20 +144,43 @@ app.get('/export-csv/:userId', (req, res) => {
   res.send('\uFEFF' + csv);
 });
 
-// 5.1 Acil Durum / SOS Bildirimi
+// 5.1 Acil Durum / SOS Bildirimi (RAM, DB ve REST destekli)
+let activeSos = null;
+
+app.get('/api/sos', (req, res) => {
+  res.json(activeSos);
+});
+
+app.delete('/api/sos', (req, res) => {
+  activeSos = null;
+  io.emit('sosCleared');
+  res.json({ status: 'SOS_CLEARED' });
+});
+
 app.post('/sos', (req, res) => {
   const { userId, latitude, longitude, speed, battery, timestamp } = req.body;
-  const alertPayload = {
-    userId: userId || 'Bilinmeyen Personel',
-    latitude: Number(latitude) || 0,
-    longitude: Number(longitude) || 0,
-    speed: Number(speed) || 0,
-    battery: Number(battery) || 100,
-    timestamp: timestamp || new Date().toISOString()
+  const user = userId || 'Saha_Personeli_1';
+  const lat = Number(latitude) || 41.042;
+  const lon = Number(longitude) || 28.69;
+  const spd = Number(speed) || 0;
+  const bat = Number(battery) || 100;
+  const ts = timestamp || new Date().toISOString();
+
+  // Konumu RAM ve DB'ye hemen isle ki haritada aninda belirtsin
+  processLocation(user, lat, lon, spd, bat, ts);
+
+  activeSos = {
+    userId: user,
+    latitude: lat,
+    longitude: lon,
+    speed: spd,
+    battery: bat,
+    timestamp: ts
   };
-  io.emit('sosAlert', alertPayload);
-  console.log(`[🚨 SOS ÇAĞRISI] ${alertPayload.userId} acil durum bildirdi! (${alertPayload.latitude}, ${alertPayload.longitude})`);
-  res.json({ status: 'SOS_EMITTED', data: alertPayload });
+
+  io.emit('sosAlert', activeSos);
+  console.log(`[🚨 SOS ÇAĞRISI] ${user} acil durum bildirdi! (${lat}, ${lon})`);
+  res.json({ status: 'SOS_EMITTED', data: activeSos });
 });
 
 // 6. Haftalik Calisma ve Mesai Saatleri Ayarlari
@@ -266,7 +289,8 @@ app.use((req, res, next) => {
     req.path.startsWith('/export-csv') ||
     req.path.startsWith('/shift-') ||
     req.path.startsWith('/geofences') ||
-    req.path.startsWith('/update')
+    req.path.startsWith('/update') ||
+    req.path.startsWith('/sos')
   ) {
     return next();
   }
