@@ -4,10 +4,11 @@
   "private": true,
   "description": "Personel Takip Sistemi - Web ve Mobil GPS Takip",
   "scripts": {
-    "build": "cd admin-panel && npm install && npm run build && cd ../backend && npm install",
+    "build": "npm install --prefix admin-panel && npm --prefix admin-panel run build && npm install --prefix backend",
     "start": "node backend/server.js"
   },
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=22.12.0"
   }
 }
+

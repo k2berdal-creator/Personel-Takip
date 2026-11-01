@@ -4,8 +4,11 @@ services:
     runtime: node
     plan: free
     region: frankfurt
-    buildCommand: npm run build
+    buildCommand: npm install --prefix admin-panel && npm --prefix admin-panel run build && npm install --prefix backend
     startCommand: npm start
     envVars:
       - key: NODE_ENV
         value: production
+      - key: NODE_VERSION
+        value: 22.14.0
+
