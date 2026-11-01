@@ -243,8 +243,14 @@ export default function App() {
   const [playbackSpeed, setPlaybackSpeed] = useState(1);
   const playbackTimerRef = useRef(null);
 
-  // 5. Harita Katmanı (Sokak / Uydu / Gece)
+  // 5. Harita Katmanı (Sokak / Uydu / Gece) & Isı Haritası
   const [currentLayer, setCurrentLayer] = useState('standard');
+  const [showHeatmap, setShowHeatmap] = useState(false);
+
+  // 5.1 Telsiz & Hızlı Anons Gönderimi (Dispatch)
+  const [dispatchText, setDispatchText] = useState('');
+  const [dispatchTarget, setDispatchTarget] = useState('ALL');
+  const [dispatchNotice, setDispatchNotice] = useState('');
 
   // 6. Hız Aşımı & Alarmlar
   const [speedLimit, setSpeedLimit] = useState(80);
@@ -453,10 +459,25 @@ export default function App() {
     const handleGeofencesUpdate = (fences) => setGeofences(fences || []);
     const handleShiftSettingsUpdate = (settings) => setShiftSettings(settings);
 
+    const handleFieldStatusUpdate = (statusData) => {
+      if (!statusData || !statusData.userId) return;
+      setLocations((prev) => {
+        if (!prev[statusData.userId]) return prev;
+        return {
+          ...prev,
+          [statusData.userId]: {
+            ...prev[statusData.userId],
+            statusText: statusData.statusText
+          }
+        };
+      });
+    };
+
     socket.on('connect', handleConnect);
     socket.on('disconnect', handleDisconnect);
     socket.on('initialLocations', handleInitialLocations);
     socket.on('locationUpdate', handleLocationUpdate);
+    socket.on('fieldStatusUpdate', handleFieldStatusUpdate);
     socket.on('geofenceAlert', handleGeofenceAlert);
     socket.on('sosAlert', handleSosAlert);
     socket.on('sosCleared', () => setSosModalData(null));
@@ -473,6 +494,7 @@ export default function App() {
       socket.off('disconnect', handleDisconnect);
       socket.off('initialLocations', handleInitialLocations);
       socket.off('locationUpdate', handleLocationUpdate);
+      socket.off('fieldStatusUpdate', handleFieldStatusUpdate);
       socket.off('geofenceAlert', handleGeofenceAlert);
       socket.off('sosAlert', handleSosAlert);
       socket.off('sosCleared');
@@ -522,6 +544,61 @@ export default function App() {
       alert('İndirme hatası: ' + e.message);
     }
   };
+
+  // Telsiz & Hızlı Anons Gönderimi (Dispatch)
+  const sendDispatch = (presetText) => {
+    const textToSend = (presetText || dispatchText).trim();
+    if (!textToSend) return;
+
+    fetch(`${BACKEND_URL}/api/message`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        from: 'Merkez Yönetim',
+        target: dispatchTarget,
+        text: textToSend
+      })
+    })
+      .then((r) => r.json())
+      .then(() => {
+        setDispatchNotice(`Anons iletildi: "${textToSend}"`);
+        setDispatchText('');
+        setTimeout(() => setDispatchNotice(''), 3500);
+      })
+      .catch((err) => alert('Anons hatası: ' + err.message));
+  };
+
+  // Hıza Göre Renk Değiştiren Rota Segmentleri (Speed Gradient Trail)
+  const gradientSegments = React.useMemo(() => {
+    if (!rawHistory || rawHistory.length < 2) return [];
+    const segments = [];
+    const getSpeedColor = (spd) => {
+      if (spd > 80) return '#d93025'; // Kırmızı (>80 km/s)
+      if (spd > 50) return '#f2994a'; // Turuncu (50-80 km/s)
+      if (spd > 15) return '#1a73e8'; // Mavi (15-50 km/s)
+      return '#188038'; // Yeşil (0-15 km/s)
+    };
+
+    for (let i = 0; i < rawHistory.length - 1; i++) {
+      const p1 = rawHistory[i];
+      const p2 = rawHistory[i + 1];
+      const avgSpd = (Number(p1.speed || 0) + Number(p2.speed || 0)) / 2;
+      const color = getSpeedColor(avgSpd);
+
+      if (segments.length > 0 && segments[segments.length - 1].color === color) {
+        segments[segments.length - 1].positions.push([p2.latitude, p2.longitude]);
+      } else {
+        segments.push({
+          color,
+          positions: [
+            [p1.latitude, p1.longitude],
+            [p2.latitude, p2.longitude]
+          ]
+        });
+      }
+    }
+    return segments;
+  }, [rawHistory]);
 
   // Çit Ekleme
   const handleAddGeofence = () => {
@@ -802,9 +879,15 @@ export default function App() {
             </div>
 
             {userSummary && (
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px', marginTop: '8px', fontSize: '12px', backgroundColor: '#fff', padding: '8px', borderRadius: '6px' }}>
-                <div>Toplam: <strong>{userSummary.totalKm} km</strong></div>
-                <div>Max Hız: <strong>{userSummary.maxSpeed} km/s</strong></div>
+              <div style={{ backgroundColor: '#ffffff', padding: '8px', borderRadius: '6px', marginTop: '8px', fontSize: '12px', border: '1px solid #e0e0e0' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px' }}>
+                  <div>Mesafe: <strong>{userSummary.totalKm} km</strong></div>
+                  <div>Max Hız: <strong>{userSummary.maxSpeed} km/s</strong></div>
+                </div>
+                <div style={{ marginTop: '6px', paddingTop: '6px', borderTop: '1px dashed #dadce0', display: 'flex', justifyContent: 'space-between', color: '#137333', fontWeight: 'bold' }}>
+                  <span>⛽ Tahmini Yakıt:</span>
+                  <span>{((userSummary.totalKm || 0) * 0.075).toFixed(1)} L (~{Math.round(((userSummary.totalKm || 0) * 0.075) * 45)} ₺)</span>
+                </div>
               </div>
             )}
 
@@ -932,9 +1015,65 @@ export default function App() {
               <div style={{ fontSize: '11px', color: '#80868b', marginTop: '4px' }}>
                 Son Sinyal: {loc.timestamp ? new Date(loc.timestamp).toLocaleTimeString() : '-'}
               </div>
+
+              {loc.statusText && (
+                <div style={{ marginTop: '5px', fontSize: '11px', color: '#1a73e8', backgroundColor: '#e8f0fe', padding: '2px 8px', borderRadius: '4px', display: 'inline-block', fontWeight: 'bold' }}>
+                  💬 {loc.statusText}
+                </div>
+              )}
             </div>
           );
         })}
+
+        {/* Telsiz & Hızlı Anons Gönderimi (Dispatch) */}
+        <div style={{ marginTop: '16px', padding: '12px', backgroundColor: '#ffffff', borderRadius: '8px', border: '1px solid #dadce0' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '8px' }}>
+            <span style={{ fontSize: '14px' }}>📢</span>
+            <strong style={{ fontSize: '12px', color: '#202124' }}>Saha Telsiz & Anons</strong>
+          </div>
+          <div style={{ display: 'flex', gap: '4px', marginBottom: '6px' }}>
+            <select
+              value={dispatchTarget}
+              onChange={(e) => setDispatchTarget(e.target.value)}
+              style={{ fontSize: '11px', padding: '4px', borderRadius: '4px', border: '1px solid #ccc', maxWidth: '100px' }}
+            >
+              <option value="ALL">📢 Tüm Saha</option>
+              {Object.keys(locations).map((u) => (
+                <option key={u} value={u}>{u}</option>
+              ))}
+            </select>
+            <input
+              type="text"
+              placeholder="Anons yazın..."
+              value={dispatchText}
+              onChange={(e) => setDispatchText(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') sendDispatch(); }}
+              style={{ flex: 1, fontSize: '11px', padding: '4px 6px', borderRadius: '4px', border: '1px solid #ccc' }}
+            />
+            <button
+              onClick={() => sendDispatch()}
+              style={{ padding: '4px 8px', backgroundColor: '#1a73e8', color: '#fff', border: 'none', borderRadius: '4px', fontSize: '11px', fontWeight: 'bold', cursor: 'pointer' }}
+            >
+              Gönder
+            </button>
+          </div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
+            {['📍 Merkeze Dön', '📞 Merkezi Ara', '🍔 Mola Zamanı', '⚠️ Dikkatli Sürüş'].map((preset) => (
+              <button
+                key={preset}
+                onClick={() => sendDispatch(preset)}
+                style={{ padding: '3px 6px', backgroundColor: '#f1f3f4', border: '1px solid #dadce0', borderRadius: '4px', fontSize: '10px', cursor: 'pointer', color: '#3c4043' }}
+              >
+                {preset}
+              </button>
+            ))}
+          </div>
+          {dispatchNotice && (
+            <div style={{ marginTop: '6px', fontSize: '11px', color: '#137333', fontWeight: 'bold' }}>
+              ✓ {dispatchNotice}
+            </div>
+          )}
+        </div>
       </div>
 
       {/* SAĞ PANEL: HARİTA & OVERLAY'LER */}
@@ -972,7 +1111,46 @@ export default function App() {
               {layer.name}
             </button>
           ))}
+          <button
+            onClick={() => setShowHeatmap(!showHeatmap)}
+            style={{
+              padding: '6px 10px',
+              border: 'none',
+              borderRadius: '6px',
+              fontSize: '12px',
+              fontWeight: 'bold',
+              cursor: 'pointer',
+              backgroundColor: showHeatmap ? '#e65100' : 'transparent',
+              color: showHeatmap ? '#ffffff' : '#3c4043',
+              transition: '0.2s'
+            }}
+          >
+            🔥 Isı Haritası
+          </button>
         </div>
+
+        {/* Hız Gradyanı Renk Açıklaması (Mini Legend) */}
+        {showRoute && (
+          <div style={{
+            position: 'absolute',
+            top: '56px',
+            right: '12px',
+            zIndex: 1000,
+            backgroundColor: 'rgba(255,255,255,0.92)',
+            borderRadius: '6px',
+            padding: '4px 8px',
+            fontSize: '11px',
+            boxShadow: '0 1px 4px rgba(0,0,0,0.2)',
+            display: 'flex',
+            gap: '8px',
+            alignItems: 'center'
+          }}>
+            <span style={{ color: '#188038', fontWeight: 'bold' }}>● 0-15</span>
+            <span style={{ color: '#1a73e8', fontWeight: 'bold' }}>● 15-50</span>
+            <span style={{ color: '#f2994a', fontWeight: 'bold' }}>● 50-80</span>
+            <span style={{ color: '#d93025', fontWeight: 'bold' }}>● &gt;80 km/s</span>
+          </div>
+        )}
 
         {/* ZAMAN TÜNELİ / ROTA OYNATICI (Alt Bar) */}
         {isPlaybackOpen && rawHistory.length > 0 && (
@@ -1103,13 +1281,34 @@ export default function App() {
             </Circle>
           ))}
 
-          {/* Rota Çizgisi (Polyline) */}
-          {showRoute && routePoints.length > 1 && (
+          {/* Hıza Göre Renk Değiştiren Rota (Speed Gradient Trail) */}
+          {showRoute && gradientSegments.length > 0 && gradientSegments.map((seg, idx) => (
+            <Polyline
+              key={`grad-${idx}`}
+              positions={seg.positions}
+              pathOptions={{ color: seg.color, weight: 5, opacity: 0.85 }}
+            />
+          ))}
+          {showRoute && gradientSegments.length === 0 && routePoints.length > 1 && (
             <Polyline
               positions={routePoints}
               pathOptions={{ color: '#1a73e8', weight: 4, opacity: 0.8 }}
             />
           )}
+
+          {/* Saha Yoğunluk Isı Haritası (Heatmap Layer) */}
+          {showHeatmap && rawHistory.map((p, idx) => (
+            <Circle
+              key={`heat-${idx}`}
+              center={[p.latitude, p.longitude]}
+              radius={(p.speed || 0) < 5 ? 75 : 45}
+              pathOptions={{
+                color: 'transparent',
+                fillColor: (p.speed || 0) < 5 ? '#d93025' : '#f2994a',
+                fillOpacity: 0.18
+              }}
+            />
+          ))}
 
           {/* Duraklama ve Mola Noktaları (P Marker'ları) */}
           {showStops && stops.map((st, idx) => (

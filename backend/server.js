@@ -11,14 +11,12 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Statik panel onceligi: Derlenmis React admin paneli (admin-panel/dist)
+// Statik panel onceligi: Derlenmis React admin paneli ve mobil istemci
+app.use(express.static(path.join(__dirname, 'public')));
 const adminDistPath = path.join(__dirname, '../admin-panel/dist');
 if (fs.existsSync(adminDistPath)) {
   console.log('[PROD] React Admin Panel (admin-panel/dist) statik olarak sunuluyor.');
   app.use(express.static(adminDistPath));
-} else {
-  console.log('[DEV] public klasoru statik olarak sunuluyor.');
-  app.use(express.static(path.join(__dirname, 'public')));
 }
 
 const server = http.createServer(app);
@@ -183,6 +181,46 @@ app.post('/sos', (req, res) => {
   res.json({ status: 'SOS_EMITTED', data: activeSos });
 });
 
+// 5.2 Telsiz & Hızlı Mesajlaşma (Dispatch Messaging)
+let dispatchMessages = [];
+
+app.get('/api/messages', (req, res) => {
+  res.json(dispatchMessages.slice(-50));
+});
+
+app.post('/api/message', (req, res) => {
+  const { from, target, text } = req.body;
+  if (!text) return res.status(400).json({ error: 'Mesaj metni zorunludur' });
+  const msg = {
+    id: Date.now().toString(),
+    from: from || 'Merkez Yönetim',
+    target: target || 'ALL',
+    text: text.trim(),
+    timestamp: new Date().toISOString()
+  };
+  dispatchMessages.push(msg);
+  if (dispatchMessages.length > 200) dispatchMessages.shift();
+  io.emit('adminNotice', msg);
+  console.log(`[📢 ANONS] ${msg.from} -> ${msg.target}: "${msg.text}"`);
+  res.json({ status: 'OK', data: msg });
+});
+
+app.post('/api/status-update', (req, res) => {
+  const { userId, statusText } = req.body;
+  if (!userId || !statusText) return res.status(400).json({ error: 'Eksik bilgi' });
+  const payload = {
+    userId,
+    statusText,
+    timestamp: new Date().toISOString()
+  };
+  if (activeLocations[userId]) {
+    activeLocations[userId].statusText = statusText;
+  }
+  io.emit('fieldStatusUpdate', payload);
+  console.log(`[💬 SAHA BİLDİRİMİ] ${userId}: "${statusText}"`);
+  res.json({ status: 'OK', data: payload });
+});
+
 // 6. Haftalik Calisma ve Mesai Saatleri Ayarlari
 app.get('/shift-settings', (req, res) => {
   res.json(db.getShiftSettings());
@@ -273,6 +311,17 @@ io.on('connection', (socket) => {
     );
   });
 
+  socket.on('fieldStatus', (data) => {
+    if (!data || !data.userId) return;
+    if (activeLocations[data.userId]) activeLocations[data.userId].statusText = data.statusText;
+    io.emit('fieldStatusUpdate', data);
+  });
+
+  socket.on('adminNotice', (data) => {
+    if (!data || !data.text) return;
+    io.emit('adminNotice', data);
+  });
+
   socket.on('disconnect', () => {
     console.log('Soket ayrildi:', socket.id);
   });
@@ -290,7 +339,12 @@ app.use((req, res, next) => {
     req.path.startsWith('/shift-') ||
     req.path.startsWith('/geofences') ||
     req.path.startsWith('/update') ||
-    req.path.startsWith('/sos')
+    req.path.startsWith('/sos') ||
+    req.path.startsWith('/takip') ||
+    req.path.startsWith('/manifest') ||
+    req.path.startsWith('/sw.js') ||
+    req.path.endsWith('.png') ||
+    req.path.endsWith('.ico')
   ) {
     return next();
   }

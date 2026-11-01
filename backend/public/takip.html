@@ -4,17 +4,24 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>Saha Personel Takip - Mobil İstemci</title>
+  <link rel="manifest" href="/manifest.json">
+  <meta name="theme-color" content="#1a73e8">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Saha Takip">
+  <link rel="apple-touch-icon" href="/icon-192.png">
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f1f3f4; padding: 20px; }
-    .card { background: white; border-radius: 14px; padding: 20px; box-shadow: 0 4px 16px rgba(0,0,0,0.08); max-width: 420px; margin: 0 auto 16px auto; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f1f3f4; padding: 16px; }
+    .card { background: white; border-radius: 14px; padding: 18px; box-shadow: 0 4px 16px rgba(0,0,0,0.08); max-width: 440px; margin: 0 auto 16px auto; }
     h1 { font-size: 20px; color: #202124; text-align: center; margin-bottom: 12px; }
-    .status-badge { display: block; text-align: center; font-size: 13px; font-weight: bold; padding: 6px 12px; border-radius: 20px; margin-bottom: 16px; }
+    .status-badge { display: block; text-align: center; font-size: 13px; font-weight: bold; padding: 6px 12px; border-radius: 20px; margin-bottom: 14px; }
     .online { background: #e6f4ea; color: #137333; }
     .offline { background: #fce8e6; color: #c5221f; }
     label { font-size: 13px; font-weight: 600; color: #5f6368; display: block; margin-bottom: 6px; }
-    input { width: 100%; padding: 12px; border: 1px solid #dadce0; border-radius: 8px; font-size: 15px; margin-bottom: 14px; }
-    button { width: 100%; padding: 14px; border: none; border-radius: 8px; font-size: 15px; font-weight: bold; cursor: pointer; margin-bottom: 10px; transition: 0.2s; }
+    input { width: 100%; padding: 12px; border: 1px solid #dadce0; border-radius: 8px; font-size: 15px; margin-bottom: 12px; }
+    button { width: 100%; padding: 13px; border: none; border-radius: 8px; font-size: 14px; font-weight: bold; cursor: pointer; margin-bottom: 8px; transition: 0.2s; }
     .btn-primary { background: #1a73e8; color: white; }
     .btn-success { background: #1e8e3e; color: white; }
     .btn-danger { background: #d93025; color: white; }
@@ -26,12 +33,30 @@
     .mode-pill { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 10px; font-weight: bold; }
     .moving { background: #e8f0fe; color: #1a73e8; }
     .idle { background: #e6f4ea; color: #137333; }
+    
+    /* Telsiz & Hızlı Durum Butonları */
+    .status-chips-title { font-size: 12px; font-weight: bold; color: #5f6368; margin-top: 10px; margin-bottom: 6px; }
+    .status-chips { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 12px; }
+    .chip-btn { background: #f1f3f4; border: 1px solid #dadce0; border-radius: 8px; padding: 10px 8px; font-size: 12px; font-weight: 600; color: #202124; cursor: pointer; text-align: center; }
+    .chip-btn:active { background: #e8f0fe; border-color: #1a73e8; color: #1a73e8; }
+    
+    /* Merkez Anons Bildirim Afişi */
+    .notice-banner { background: #fef7e0; border: 2px solid #f9ab00; border-radius: 10px; padding: 12px; margin-bottom: 14px; display: none; animation: pulseBanner 1s infinite alternate; }
+    @keyframes pulseBanner { from { box-shadow: 0 0 4px rgba(249, 171, 0, 0.4); } to { box-shadow: 0 0 14px rgba(249, 171, 0, 0.9); } }
+    .notice-banner h3 { font-size: 14px; color: #b06000; margin-bottom: 4px; display: flex; align-items: center; gap: 6px; }
+    .notice-banner p { font-size: 13px; color: #202124; font-weight: bold; margin: 0; }
   </style>
 </head>
 <body>
   <div class="card">
     <h1>Personel Mobil Konum</h1>
     <div id="conn-badge" class="status-badge offline">Sunucuya Bağlanıyor...</div>
+
+    <!-- Merkez Anons Afişi -->
+    <div id="notice-banner" class="notice-banner">
+      <h3>📢 Merkez Yönetim Mesajı:</h3>
+      <p id="notice-text">Lütfen merkezi arayın.</p>
+    </div>
 
     <label for="user-id">Personel Adı / Kod:</label>
     <input type="text" id="user-id" value="Saha_Personeli_1" placeholder="Örn: Ahmet_Kaya">
@@ -43,6 +68,15 @@
     <button class="btn-outline" onclick="sendSimulatedLocation()">
       📍 Test Konumu Gönder (Simülasyon)
     </button>
+
+    <!-- Hızlı Durum / Telsiz Bildirimi -->
+    <div class="status-chips-title">💬 Hızlı Durum / Telsiz Bildirimi:</div>
+    <div class="status-chips">
+      <button type="button" class="chip-btn" onclick="sendStatus('🚦 Trafikteyim')">🚦 Trafikteyim</button>
+      <button type="button" class="chip-btn" onclick="sendStatus('🍽️ Mola / Yemek')">🍽️ Mola / Yemek</button>
+      <button type="button" class="chip-btn" onclick="sendStatus('✅ Görev Bitti')">✅ Görev Bitti</button>
+      <button type="button" class="chip-btn" onclick="sendStatus('🏢 Merkeze Dönüyorum')">🏢 Merkeze Dönüş</button>
+    </div>
 
     <!-- SOS Panik Butonu -->
     <button class="btn-sos" onclick="triggerSos()">
@@ -268,6 +302,51 @@
       simLon += (Math.random() - 0.45) * 0.002;
       const simSpeed = Math.floor(Math.random() * 45);
       sendLocation(simLat, simLon, simSpeed, true);
+    }
+
+    // Telsiz / Hızlı Durum Bildirimi Gönder
+    function sendStatus(statusText) {
+      const userId = userIdInput.value.trim() || 'Saha_Personeli_1';
+      statusMsgSpan.textContent = `Durum bildirildi: ${statusText}`;
+
+      if (socket && socket.connected) {
+        socket.emit('fieldStatus', { userId, statusText, timestamp: new Date().toISOString() });
+      }
+
+      fetch('/api/status-update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId, statusText })
+      }).catch(() => {});
+    }
+
+    // Merkezden Gelen Anonsları Dinle
+    socket.on('adminNotice', (data) => {
+      const myId = userIdInput.value.trim();
+      if (!data || (data.target !== 'ALL' && data.target !== myId)) return;
+
+      const banner = document.getElementById('notice-banner');
+      const text = document.getElementById('notice-text');
+      text.textContent = data.text;
+      banner.style.display = 'block';
+
+      // Titreşim ve Bip Sesi
+      if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
+      try {
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const osc = ctx.createOscillator();
+        osc.connect(ctx.destination);
+        osc.frequency.value = 750;
+        osc.start();
+        setTimeout(() => osc.stop(), 300);
+      } catch (e) {}
+    });
+
+    // PWA Service Worker Kaydı
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('/sw.js').catch(() => {});
+      });
     }
   </script>
 </body>
