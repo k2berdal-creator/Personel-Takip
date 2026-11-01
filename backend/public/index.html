@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Personel Takip - Profesyonel Harita</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: flex; height: 100vh; }
+    #sidebar { width: 360px; background: #ffffff; border-right: 1px solid #e0e0e0; display: flex; flex-direction: column; }
+    #sidebar-header { padding: 16px; border-bottom: 1px solid #e0e0e0; display: flex; align-items: center; justify-content: space-between; }
+    #sidebar-header h1 { font-size: 18px; color: #202124; }
+    .status-badge { font-size: 11px; padding: 4px 8px; border-radius: 12px; font-weight: bold; }
+    .online { background: #e6f4ea; color: #137333; }
+    .offline { background: #fce8e6; color: #c5221f; }
+    .actions-box { padding: 12px 16px; border-bottom: 1px solid #e0e0e0; background: #f8f9fa; }
+    .btn-qr { width: 100%; padding: 10px; background: #1e8e3e; color: white; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; margin-bottom: 8px; font-size: 13px; }
+    .btn-qr:hover { background: #137333; }
+    #alert-box { display: none; padding: 10px; background: #fce8e6; color: #c5221f; border-bottom: 1px solid #fad2cf; font-size: 12px; }
+    #personnel-list { flex: 1; overflow-y: auto; padding: 12px; }
+    .person-card { padding: 12px; border: 1px solid #dadce0; border-radius: 8px; margin-bottom: 8px; cursor: pointer; transition: 0.2s; background: #fff; }
+    .person-card:hover { border-color: #1a73e8; background: #f8fafd; }
+    .person-card.active { border-color: #1a73e8; background: #e8f0fe; }
+    .card-top { display: flex; justify-content: space-between; align-items: center; }
+    .person-name { font-weight: bold; font-size: 15px; color: #1a73e8; }
+    .person-meta { font-size: 12px; color: #5f6368; margin-top: 4px; display: flex; justify-content: space-between; }
+    .summary-box { display: none; background: #e8f0fe; padding: 10px; border-radius: 6px; margin-top: 8px; font-size: 12px; }
+    .btn-excel { display: inline-block; padding: 6px 12px; background: #137333; color: white; text-decoration: none; border-radius: 4px; font-size: 11px; font-weight: bold; margin-top: 6px; }
+    #map { flex: 1; height: 100%; }
+    .empty-msg { text-align: center; color: #80868b; padding: 24px 12px; font-size: 14px; }
+
+    /* Modal */
+    #qr-modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 9999; align-items: center; justify-content: center; }
+    .modal-content { background: white; padding: 24px; border-radius: 12px; text-align: center; max-width: 360px; width: 90%; box-shadow: 0 4px 20px rgba(0,0,0,0.15); }
+    .modal-content img { width: 220px; height: 220px; border-radius: 8px; border: 1px solid #eee; margin-bottom: 16px; }
+    .btn-close { padding: 8px 16px; background: #dadce0; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; }
+  </style>
+</head>
+<body>
+  <div id="sidebar">
+    <div id="sidebar-header">
+      <h1>Personel Takip</h1>
+      <span id="conn-status" class="status-badge offline">Bağlanıyor...</span>
+    </div>
+
+    <div id="alert-box"></div>
+
+    <div class="actions-box">
+      <button class="btn-qr" onclick="showQrModal()">
+        📱 Personel İçin QR Kod Göster
+      </button>
+      <a style="display:block; font-size:12px; color:#1a73e8; text-align:center; text-decoration:none;" href="/takip.html" target="_blank">
+        🔗 Mobil Takip Ekranı (/takip.html)
+      </a>
+    </div>
+
+    <div id="personnel-list">
+      <div id="empty-state" class="empty-msg">Henüz aktif personel konumu yok.<br><br>Personel bağlandığında burada listelenir.</div>
+    </div>
+  </div>
+  <div id="map"></div>
+
+  <!-- QR Modal -->
+  <div id="qr-modal">
+    <div class="modal-content">
+      <h3 style="margin-bottom:8px;">📱 Personel Giriş Karekodu</h3>
+      <p style="font-size:13px; color:#666; margin-bottom:16px;">Saha personeli telefonunun kamerasıyla bu karekodu okuttuğunda takip sayfası doğrudan açılır.</p>
+      <img id="qr-img" src="" alt="QR Kod">
+      <div id="qr-url-text" style="font-size: 11px; color: #1a73e8; word-break: break-all; margin-bottom: 12px;"></div>
+      <button class="btn-close" onclick="closeQrModal()">Kapat</button>
+    </div>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    const map = L.map('map').setView([41.042, 28.69], 13);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; OpenStreetMap'
+    }).addTo(map);
+
+    const markers = {};
+    const locations = {};
+    let selectedUser = null;
+    let currentPolyline = null;
+
+    const socket = io();
+    const connStatus = document.getElementById('conn-status');
+    const personnelList = document.getElementById('personnel-list');
+    const emptyState = document.getElementById('empty-state');
+    const alertBox = document.getElementById('alert-box');
+
+    socket.on('connect', () => {
+      connStatus.textContent = '● Canlı Bağlı';
+      connStatus.className = 'status-badge online';
+    });
+
+    socket.on('disconnect', () => {
+      connStatus.textContent = '○ Bağlantı Kesildi';
+      connStatus.className = 'status-badge offline';
+    });
+
+    socket.on('geofenceAlert', (data) => {
+      alertBox.style.display = 'block';
+      alertBox.textContent = `⚠️ ${data.userId}, "${data.fenceName}" bölgesinden ${data.distance} metre dışarı çıktı!`;
+      setTimeout(() => { alertBox.style.display = 'none'; }, 8000);
+    });
+
+    function getSpeedIcon(spd) {
+      const s = Math.round(spd || 0);
+      if (s === 0) return '🔴 Duruyor';
+      if (s < 10) return `🚶 ${s} km/s`;
+      return `🚗 ${s} km/s`;
+    }
+
+    function updateUI(user, lat, lng, time, speed = 0, battery = 100) {
+      locations[user] = { lat, lng, time, speed, battery };
+      if (emptyState) emptyState.style.display = 'none';
+
+      const spdText = getSpeedIcon(speed);
+
+      // Marker güncelle
+      if (markers[user]) {
+        markers[user].setLatLng([lat, lng]);
+        markers[user].setPopupContent(`<b>${user}</b><br>Hız: ${spdText}<br>Pil: %${battery}<br>Saat: ${new Date(time).toLocaleTimeString()}`);
+      } else {
+        const marker = L.marker([lat, lng]).addTo(map);
+        marker.bindPopup(`<b>${user}</b><br>Hız: ${spdText}<br>Pil: %${battery}<br>Saat: ${new Date(time).toLocaleTimeString()}`);
+        marker.on('click', () => selectUser(user));
+        markers[user] = marker;
+      }
+
+      // Kart
+      let card = document.getElementById(`user-card-${user}`);
+      if (!card) {
+        card = document.createElement('div');
+        card.id = `user-card-${user}`;
+        card.className = 'person-card';
+        card.onclick = () => selectUser(user);
+        personnelList.appendChild(card);
+      }
+      card.innerHTML = `
+        <div class="card-top">
+          <span class="person-name">${user}</span>
+          <span style="font-size:12px; font-weight:bold; color:#188038;">🔋 %${battery}</span>
+        </div>
+        <div class="person-meta">
+          <span>${spdText}</span>
+          <span>${new Date(time).toLocaleTimeString()}</span>
+        </div>
+        <div id="summary-${user}" class="summary-box">
+          <div>Yükleniyor...</div>
+        </div>
+      `;
+    }
+
+    function selectUser(user) {
+      selectedUser = user;
+      document.querySelectorAll('.person-card').forEach(c => c.classList.remove('active'));
+      const activeCard = document.getElementById(`user-card-${user}`);
+      if (activeCard) activeCard.classList.add('active');
+
+      if (locations[user]) {
+        map.setView([locations[user].lat, locations[user].lng], 16);
+        if (markers[user]) markers[user].openPopup();
+      }
+
+      // Geçmiş rotayı çiz
+      fetch(`/history/${encodeURIComponent(user)}`)
+        .then(res => res.json())
+        .then(pts => {
+          if (currentPolyline) map.removeLayer(currentPolyline);
+          const latlngs = pts.map(p => [p.latitude, p.longitude]);
+          if (latlngs.length > 1) {
+            currentPolyline = L.polyline(latlngs, { color: '#1a73e8', weight: 4 }).addTo(map);
+          }
+        });
+
+      // Günlük istatistik ve Excel linki aç
+      fetch(`/summary/${encodeURIComponent(user)}`)
+        .then(res => res.json())
+        .then(sum => {
+          const sBox = document.getElementById(`summary-${user}`);
+          if (sBox) {
+            sBox.style.display = 'block';
+            sBox.innerHTML = `
+              <div>Toplam Yol: <b>${sum.totalKm} km</b> | Max Hız: <b>${sum.maxSpeed} km/s</b></div>
+              <a class="btn-excel" href="/export-csv/${encodeURIComponent(user)}" download>📥 Excel / CSV İndir</a>
+            `;
+          }
+        });
+    }
+
+    function showQrModal() {
+      const targetUrl = window.location.origin + '/takip.html';
+      const qrApiUrl = 'https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=' + encodeURIComponent(targetUrl);
+      document.getElementById('qr-img').src = qrApiUrl;
+      document.getElementById('qr-url-text').textContent = targetUrl;
+      document.getElementById('qr-modal').style.display = 'flex';
+    }
+
+    function closeQrModal() {
+      document.getElementById('qr-modal').style.display = 'none';
+    }
+
+    socket.on('initialLocations', (data) => {
+      if (!data) return;
+      Object.entries(data).forEach(([u, loc]) => {
+        updateUI(u, Number(loc.latitude), Number(loc.longitude), loc.timestamp, loc.speed, loc.battery);
+      });
+    });
+
+    socket.on('locationUpdate', (data) => {
+      if (!data || !data.userId) return;
+      updateUI(data.userId, Number(data.latitude), Number(data.longitude), data.timestamp, data.speed, data.battery);
+    });
+
+    fetch('/locations')
+      .then(res => res.json())
+      .then(data => {
+        Object.entries(data).forEach(([u, loc]) => {
+          updateUI(u, Number(loc.latitude), Number(loc.longitude), loc.timestamp, loc.speed, loc.battery);
+        });
+      })
+      .catch(() => {});
+  </script>
+</body>
+</html>

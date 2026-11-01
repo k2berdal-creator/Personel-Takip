@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Saha Personel Takip - Mobil İstemci</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f1f3f4; padding: 20px; }
+    .card { background: white; border-radius: 12px; padding: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); max-width: 420px; margin: 0 auto 16px auto; }
+    h1 { font-size: 20px; color: #202124; text-align: center; margin-bottom: 12px; }
+    .status-badge { display: block; text-align: center; font-size: 13px; font-weight: bold; padding: 6px 12px; border-radius: 20px; margin-bottom: 16px; }
+    .online { background: #e6f4ea; color: #137333; }
+    .offline { background: #fce8e6; color: #c5221f; }
+    label { font-size: 13px; font-weight: 600; color: #5f6368; display: block; margin-bottom: 6px; }
+    input { width: 100%; padding: 12px; border: 1px solid #dadce0; border-radius: 8px; font-size: 15px; margin-bottom: 16px; }
+    button { width: 100%; padding: 14px; border: none; border-radius: 8px; font-size: 15px; font-weight: bold; cursor: pointer; margin-bottom: 10px; transition: 0.2s; }
+    .btn-primary { background: #1a73e8; color: white; }
+    .btn-success { background: #1e8e3e; color: white; }
+    .btn-danger { background: #d93025; color: white; }
+    .btn-outline { background: #f8f9fa; border: 1px solid #dadce0; color: #1a73e8; }
+    .btn-outline:active { background: #e8f0fe; }
+    .info-box { background: #f8f9fa; border-radius: 8px; padding: 12px; font-size: 13px; color: #3c4043; line-height: 1.6; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Personel Mobil Konum</h1>
+    <div id="conn-badge" class="status-badge offline">Sunucuya Bağlanıyor...</div>
+
+    <label for="user-id">Personel Adı / Kod:</label>
+    <input type="text" id="user-id" value="Saha_Personeli_1" placeholder="Örn: Ahmet_Kaya">
+
+    <button id="btn-toggle-tracking" class="btn-success" onclick="toggleTracking()">
+      ▶ Gerçek GPS Takibini Başlat
+    </button>
+
+    <button class="btn-outline" onclick="sendSimulatedLocation()">
+      📍 Test Konumu Gönder (Simülasyon)
+    </button>
+
+    <div class="info-box" style="margin-top: 14px;">
+      <div><strong>Son İletilen:</strong> <span id="last-coords">Henüz gönderilmedi</span></div>
+      <div><strong>Saat:</strong> <span id="last-time">-</span></div>
+      <div><strong>Durum:</strong> <span id="status-msg">Hazır</span></div>
+    </div>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script>
+    const socket = io();
+    const connBadge = document.getElementById('conn-badge');
+    const userIdInput = document.getElementById('user-id');
+    const lastCoordsSpan = document.getElementById('last-coords');
+    const lastTimeSpan = document.getElementById('last-time');
+    const statusMsgSpan = document.getElementById('status-msg');
+    const btnToggle = document.getElementById('btn-toggle-tracking');
+
+    let watchId = null;
+
+    socket.on('connect', () => {
+      connBadge.textContent = '● Merkeze Bağlı';
+      connBadge.className = 'status-badge online';
+      statusMsgSpan.textContent = 'Merkezle bağlantı kuruldu.';
+    });
+
+    socket.on('disconnect', () => {
+      connBadge.textContent = '○ Bağlantı Kesildi';
+      connBadge.className = 'status-badge offline';
+      statusMsgSpan.textContent = 'Bağlantı koptu, yeniden deneniyor...';
+    });
+
+    function sendLocation(lat, lon, speed = 0, battery = 90) {
+      const userId = userIdInput.value.trim() || 'Saha_Personeli';
+      const timeStr = new Date().toLocaleTimeString();
+      const payload = {
+        userId: userId,
+        latitude: lat,
+        longitude: lon,
+        speed: speed,
+        battery: battery,
+        timestamp: new Date().toISOString()
+      };
+
+      // 1. Soket
+      if (socket && socket.connected) {
+        socket.emit('updateLocation', payload);
+      }
+
+      // 2. HTTP POST (Garanti yedek)
+      fetch('/update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: userId, lat: lat, lon: lon, speed: speed, battery: battery })
+      })
+      .then(r => r.json())
+      .then((data) => {
+        if (data.status === 'OFF_SHIFT') {
+          connBadge.textContent = '⏰ Mesai Dışı';
+          connBadge.className = 'status-badge offline';
+          statusMsgSpan.textContent = `Mesai Dışı: ${data.message}`;
+        } else {
+          connBadge.textContent = '● Merkeze Bağlı';
+          connBadge.className = 'status-badge online';
+          statusMsgSpan.textContent = `Konum merkeze iletildi (${timeStr})`;
+        }
+      }).catch(() => {});
+
+      lastCoordsSpan.textContent = `${lat.toFixed(5)}, ${lon.toFixed(5)} (${speed} km/s, %${battery})`;
+      lastTimeSpan.textContent = timeStr;
+    }
+
+    function sendSimulatedLocation() {
+      // Ankara Kızılay civarı hafif rastgele konum
+      const baseLat = 39.92077;
+      const baseLng = 32.85411;
+      const offsetLat = (Math.random() - 0.5) * 0.01;
+      const offsetLng = (Math.random() - 0.5) * 0.01;
+      sendLocation(baseLat + offsetLat, baseLng + offsetLng);
+    }
+
+    function toggleTracking() {
+      if (watchId !== null) {
+        navigator.geolocation.clearWatch(watchId);
+        watchId = null;
+        btnToggle.textContent = '▶ Gerçek GPS Takibini Başlat';
+        btnToggle.className = 'btn-success';
+        statusMsgSpan.textContent = 'GPS takibi durduruldu.';
+        return;
+      }
+
+      if (!navigator.geolocation) {
+        alert('Cihazınızda GPS desteği bulunamadı.');
+        return;
+      }
+
+      statusMsgSpan.textContent = 'GPS konumu alınıyor...';
+      btnToggle.textContent = '⏹ Takibi Durdur';
+      btnToggle.className = 'btn-danger';
+
+      watchId = navigator.geolocation.watchPosition(
+        (pos) => {
+          sendLocation(pos.coords.latitude, pos.coords.longitude);
+        },
+        (err) => {
+          statusMsgSpan.textContent = `GPS Hatası: ${err.message}`;
+          alert(`Konum izni verin: ${err.message}`);
+          btnToggle.textContent = '▶ Gerçek GPS Takibini Başlat';
+          btnToggle.className = 'btn-success';
+          watchId = null;
+        },
+        {
+          enableHighAccuracy: true,
+          maximumAge: 0,
+          timeout: 10000
+        }
+      );
+    }
+  </script>
+</body>
+</html>
+

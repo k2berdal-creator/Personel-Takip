@@ -1,0 +1,23 @@
+# Bagimliliklar
+node_modules/
+*/node_modules/
+
+# Derleme ciktilari
+dist/
+admin-panel/dist/
+.expo/
+web-build/
+
+# Gecici ve yerel veri dosyalari
+.env
+*.log
+backend/database.sqlite
+backend/data_store.json
+*.sqlite-shm
+*.sqlite-wal
+
+# Isletim sistemi ve IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
