@@ -11,6 +11,16 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// HTML sayfaları için tarayıcı önbelleğini engelle (Canlı sürüm garantisi)
+app.use((req, res, next) => {
+  if (req.path === '/' || req.path.endsWith('.html')) {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+  }
+  next();
+});
+
 // Statik panel onceligi: Derlenmis React admin paneli (admin-panel/dist)
 const adminDistPath = path.join(__dirname, '../admin-panel/dist');
 if (fs.existsSync(adminDistPath)) {

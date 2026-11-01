@@ -275,6 +275,15 @@ export default function App() {
   });
   const [shiftStatus, setShiftStatus] = useState({ inShift: true });
 
+  // Admin panelde Service Worker önbelleğini temizleme garantisi
+  useEffect(() => {
+    if (typeof window !== 'undefined' && 'serviceWorker' in navigator) {
+      navigator.serviceWorker.getRegistrations().then((regs) => {
+        regs.forEach((reg) => reg.unregister());
+      }).catch(() => {});
+    }
+  }, []);
+
   // Şifre Giriş Doğrulaması
   const handleLogin = (e) => {
     e.preventDefault();
