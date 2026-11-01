@@ -213,6 +213,20 @@ const sosMarkerIcon = L.divIcon({
   iconAnchor: [19, 19]
 });
 
+const customerIcon = L.divIcon({
+  className: 'customer-icon',
+  html: `<div style="background-color: #0288d1; color: white; width: 30px; height: 30px; border-radius: 6px; display: flex; align-items: center; justify-content: center; border: 2px solid white; box-shadow: 0 2px 8px rgba(0,0,0,0.35); font-size: 16px;">🏢</div>`,
+  iconSize: [30, 30],
+  iconAnchor: [15, 15]
+});
+
+const reportPhotoIcon = L.divIcon({
+  className: 'report-icon',
+  html: `<div style="background-color: #673ab7; color: white; width: 30px; height: 30px; border-radius: 50%; display: flex; align-items: center; justify-content: center; border: 2px solid white; box-shadow: 0 2px 8px rgba(0,0,0,0.35); font-size: 15px;">📸</div>`,
+  iconSize: [30, 30],
+  iconAnchor: [15, 15]
+});
+
 export default function App() {
   // 1. Güvenlik / Şifre Girişi
   const [isAuthenticated, setIsAuthenticated] = useState(() => {
@@ -274,6 +288,25 @@ export default function App() {
     blockOffShift: true
   });
   const [shiftStatus, setShiftStatus] = useState({ inShift: true });
+
+  // 9. Müşteriler (POI) & Ziyaret Raporları
+  const [customers, setCustomers] = useState([]);
+  const [showCustomerModal, setShowCustomerModal] = useState(false);
+  const [newCustName, setNewCustName] = useState('Merkez Müşteri A.Ş.');
+  const [newCustAddress, setNewCustAddress] = useState('Organize Sanayi Bölgesi');
+  const [newCustRadius, setNewCustRadius] = useState('150');
+  const [customerVisits, setCustomerVisits] = useState([]);
+  const [showVisitsModal, setShowVisitsModal] = useState(false);
+
+  // 10. Fotoğraflı Saha Raporları
+  const [fieldReports, setFieldReports] = useState([]);
+  const [showReportsGallery, setShowReportsGallery] = useState(false);
+  const [selectedReportPhoto, setSelectedReportPhoto] = useState(null);
+
+  // 11. Canlı Trafik & Departman Filtresi & Sürüş Skoru
+  const [showTraffic, setShowTraffic] = useState(false);
+  const [selectedDept, setSelectedDept] = useState('ALL');
+  const [harshEventsCount, setHarshEventsCount] = useState(0);
 
   // Admin panelde Service Worker önbelleğini temizleme garantisi
   useEffect(() => {
@@ -482,6 +515,32 @@ export default function App() {
       });
     };
 
+    const handleCustomersUpdate = (data) => setCustomers(data || []);
+    const handleNewFieldReport = (rep) => {
+      playBeep(950, 0.2);
+      setFieldReports((prev) => [rep, ...prev]);
+      setAlerts((prev) => [`📸 YENİ SAHA RAPORU: ${rep.userId} fotoğraf iletti!`, ...prev.slice(0, 4)]);
+    };
+
+    const handleCustomerVisitAlert = (visitAlert) => {
+      playBeep(700, 0.25);
+      const txt = visitAlert.type === 'CHECK_IN'
+        ? `🏢 MÜŞTERİ GİRİŞİ: ${visitAlert.userId} -> "${visitAlert.customerName}" noktasına vardı.`
+        : `🏢 MÜŞTERİ ÇIKIŞI: ${visitAlert.userId} -> "${visitAlert.customerName}" ziyareti bitti (${visitAlert.durationMinutes} dk).`;
+      setAlerts((prev) => [txt, ...prev.slice(0, 4)]);
+    };
+
+    const handleDrivingAlert = (drv) => {
+      playBeep(450, 0.2);
+      setHarshEventsCount((prev) => prev + 1);
+      setAlerts((prev) => [drv.msg, ...prev.slice(0, 4)]);
+    };
+
+    const handleInactivityAlert = (inac) => {
+      playSiren();
+      setAlerts((prev) => [`⚠️ HAREKETSİZLİK UYARISI: ${inac.userId} ${inac.minutes} dakikadır sabit!`, ...prev]);
+    };
+
     socket.on('connect', handleConnect);
     socket.on('disconnect', handleDisconnect);
     socket.on('initialLocations', handleInitialLocations);
@@ -492,11 +551,19 @@ export default function App() {
     socket.on('sosCleared', () => setSosModalData(null));
     socket.on('geofencesUpdate', handleGeofencesUpdate);
     socket.on('shiftSettingsUpdate', handleShiftSettingsUpdate);
+    socket.on('customersUpdate', handleCustomersUpdate);
+    socket.on('newFieldReport', handleNewFieldReport);
+    socket.on('customerVisitAlert', handleCustomerVisitAlert);
+    socket.on('drivingAlert', handleDrivingAlert);
+    socket.on('inactivityAlert', handleInactivityAlert);
 
     fetch(`${BACKEND_URL}/locations`).then((r) => r.json()).then(handleInitialLocations).catch(() => {});
     fetch(`${BACKEND_URL}/geofences`).then((r) => r.json()).then(setGeofences).catch(() => {});
     fetch(`${BACKEND_URL}/shift-settings`).then((r) => r.json()).then(setShiftSettings).catch(() => {});
     fetch(`${BACKEND_URL}/shift-status`).then((r) => r.json()).then(setShiftStatus).catch(() => {});
+    fetch(`${BACKEND_URL}/api/customers`).then((r) => r.json()).then(handleCustomersUpdate).catch(() => {});
+    fetch(`${BACKEND_URL}/api/reports`).then((r) => r.json()).then((d) => setFieldReports(d || [])).catch(() => {});
+    fetch(`${BACKEND_URL}/api/visits`).then((r) => r.json()).then((d) => setCustomerVisits(d || [])).catch(() => {});
 
     return () => {
       socket.off('connect', handleConnect);
@@ -509,6 +576,11 @@ export default function App() {
       socket.off('sosCleared');
       socket.off('geofencesUpdate', handleGeofencesUpdate);
       socket.off('shiftSettingsUpdate', handleShiftSettingsUpdate);
+      socket.off('customersUpdate', handleCustomersUpdate);
+      socket.off('newFieldReport', handleNewFieldReport);
+      socket.off('customerVisitAlert', handleCustomerVisitAlert);
+      socket.off('drivingAlert', handleDrivingAlert);
+      socket.off('inactivityAlert', handleInactivityAlert);
     };
   }, [selectedUser, selectedDate, speedLimit, isAuthenticated]);
 
@@ -627,6 +699,49 @@ export default function App() {
         setGeofences(updated);
         setShowFenceModal(false);
       });
+  };
+
+  // Müşteri (POI) Ekleme & Silme
+  const handleAddCustomer = () => {
+    const loc = selectedUser && locations[selectedUser] ? locations[selectedUser] : { lat: 41.04239, lng: 28.68986 };
+    fetch(`${BACKEND_URL}/api/customers`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: newCustName,
+        address: newCustAddress,
+        latitude: loc.lat,
+        longitude: loc.lng,
+        radius: Number(newCustRadius)
+      })
+    })
+      .then((r) => r.json())
+      .then((data) => {
+        setCustomers(data);
+        setShowCustomerModal(false);
+      })
+      .catch((err) => alert('Müşteri ekleme hatası: ' + err.message));
+  };
+
+  const handleDeleteCustomer = (id) => {
+    fetch(`${BACKEND_URL}/api/customers/${id}`, { method: 'DELETE' })
+      .then((r) => r.json())
+      .then(setCustomers)
+      .catch(() => {});
+  };
+
+  // Müşteriye Canlı Takip Linki Kopyalama
+  const handleCopyTrackLink = (userId) => {
+    const url = `${window.location.origin}/track/${encodeURIComponent(userId)}`;
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(url).then(() => {
+        alert(`🔗 Müşteri Canlı Takip Linki Kopyalandı:\n\n${url}\n\nBu linki müşteriye gönderebilirsiniz.`);
+      }).catch(() => {
+        prompt('Müşteri Takip Linki:', url);
+      });
+    } else {
+      prompt('Müşteri Takip Linki:', url);
+    }
   };
 
   // Mesai Kaydet
@@ -831,8 +946,8 @@ export default function App() {
           </div>
         )}
 
-        {/* Aksiyon Butonları (Grid) */}
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '6px', marginBottom: '14px' }}>
+        {/* Aksiyon Butonları (Grid 1. Satır) */}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '6px', marginBottom: '6px' }}>
           <button
             onClick={() => setShowQr(true)}
             style={{ padding: '8px 4px', backgroundColor: '#1e8e3e', color: 'white', border: 'none', borderRadius: '6px', fontSize: '11px', fontWeight: 'bold', cursor: 'pointer' }}
@@ -850,6 +965,28 @@ export default function App() {
             style={{ padding: '8px 4px', backgroundColor: '#5f6368', color: 'white', border: 'none', borderRadius: '6px', fontSize: '11px', fontWeight: 'bold', cursor: 'pointer' }}
           >
             ⏰ Mesai Ayarı
+          </button>
+        </div>
+
+        {/* Aksiyon Butonları (Grid 2. Satır: Müşteri, Ziyaret ve Saha Raporları) */}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '6px', marginBottom: '14px' }}>
+          <button
+            onClick={() => setShowCustomerModal(true)}
+            style={{ padding: '8px 4px', backgroundColor: '#0288d1', color: 'white', border: 'none', borderRadius: '6px', fontSize: '11px', fontWeight: 'bold', cursor: 'pointer' }}
+          >
+            🏢 + Müşteri
+          </button>
+          <button
+            onClick={() => setShowVisitsModal(true)}
+            style={{ padding: '8px 4px', backgroundColor: '#7b1fa2', color: 'white', border: 'none', borderRadius: '6px', fontSize: '11px', fontWeight: 'bold', cursor: 'pointer' }}
+          >
+            📋 Ziyaretler ({customerVisits.length})
+          </button>
+          <button
+            onClick={() => setShowReportsGallery(true)}
+            style={{ padding: '8px 4px', backgroundColor: '#673ab7', color: 'white', border: 'none', borderRadius: '6px', fontSize: '11px', fontWeight: 'bold', cursor: 'pointer' }}
+          >
+            📸 Raporlar ({fieldReports.length})
           </button>
         </div>
 
@@ -945,6 +1082,18 @@ export default function App() {
                 📄 PDF Karne
               </button>
             </div>
+
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '8px', paddingTop: '6px', borderTop: '1px solid #d2e3fc', fontSize: '11px' }}>
+              <span style={{ color: '#137333', fontWeight: 'bold' }}>
+                🛡️ Sürüş Güvenliği: {Math.max(65, 100 - harshEventsCount * 4)}/100
+              </span>
+              <button
+                onClick={() => handleCopyTrackLink(selectedUser)}
+                style={{ padding: '4px 8px', backgroundColor: '#ffffff', border: '1px solid #1a73e8', color: '#1a73e8', borderRadius: '4px', fontWeight: 'bold', cursor: 'pointer' }}
+              >
+                🔗 Müşteri Takip Linki
+              </button>
+            </div>
           </div>
         ) : (
           <div style={{ backgroundColor: '#fff', border: '1px dashed #dadce0', borderRadius: '8px', padding: '16px', marginBottom: '16px', textAlign: 'center' }}>
@@ -969,10 +1118,25 @@ export default function App() {
           </div>
         )}
 
-        {/* Personel Listesi */}
-        <h3 style={{ fontSize: '12px', color: '#5f6368', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '8px' }}>
-          Personel Listesi ({Object.keys(locations).length})
-        </h3>
+        {/* Personel Listesi ve Departman Filtresi */}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
+          <h3 style={{ fontSize: '12px', color: '#5f6368', textTransform: 'uppercase', letterSpacing: '0.5px', margin: 0 }}>
+            Personel (
+            {Object.entries(locations).filter(([_, l]) => selectedDept === 'ALL' || l.dept === selectedDept || l.department === selectedDept).length}
+            )
+          </h3>
+          <select
+            value={selectedDept}
+            onChange={(e) => setSelectedDept(e.target.value)}
+            style={{ fontSize: '11px', padding: '3px 6px', borderRadius: '4px', border: '1px solid #ccc', backgroundColor: '#fff', color: '#333' }}
+          >
+            <option value="ALL">👥 Tüm Ekipler</option>
+            <option value="Teknik Servis">🔧 Teknik Servis</option>
+            <option value="Satış Ekibi">💼 Satış Ekibi</option>
+            <option value="Sevkiyat & Depo">🚚 Sevkiyat</option>
+            <option value="Genel">🏢 Genel</option>
+          </select>
+        </div>
 
         {Object.keys(locations).length === 0 && (
           <div style={{ color: '#888', fontSize: '12px', padding: '10px 0' }}>
@@ -980,7 +1144,9 @@ export default function App() {
           </div>
         )}
 
-        {Object.entries(locations).map(([userId, loc]) => {
+        {Object.entries(locations)
+          .filter(([_, loc]) => selectedDept === 'ALL' || loc.dept === selectedDept || loc.department === selectedDept)
+          .map(([userId, loc]) => {
           const online = isOnline(loc.timestamp);
           const speedInfo = getSpeedBadge(loc.speed);
           const isSpeeding = loc.speed > speedLimit;
@@ -1136,6 +1302,22 @@ export default function App() {
           >
             🔥 Isı Haritası
           </button>
+          <button
+            onClick={() => setShowTraffic(!showTraffic)}
+            style={{
+              padding: '6px 10px',
+              border: 'none',
+              borderRadius: '6px',
+              fontSize: '12px',
+              fontWeight: 'bold',
+              cursor: 'pointer',
+              backgroundColor: showTraffic ? '#2e7d32' : 'transparent',
+              color: showTraffic ? '#ffffff' : '#3c4043',
+              transition: '0.2s'
+            }}
+          >
+            🚦 Trafik
+          </button>
         </div>
 
         {/* Hız Gradyanı Renk Açıklaması (Mini Legend) */}
@@ -1274,6 +1456,63 @@ export default function App() {
             url={MAP_LAYERS[currentLayer].url}
             maxZoom={19}
           />
+
+          {/* Canlı Trafik Katmanı */}
+          {showTraffic && (
+            <TileLayer
+              url="https://{s}.tile.openstreetmap.fr/hot/{z}/{x}/{y}.png"
+              opacity={0.6}
+            />
+          )}
+
+          {/* Müşteri & Şantiye (POI) Marker'ları ve Sınırları */}
+          {customers.map((cust) => (
+            <React.Fragment key={`cust-${cust.id}`}>
+              <Marker position={[cust.latitude, cust.longitude]} icon={customerIcon}>
+                <Popup>
+                  <div style={{ fontSize: '13px' }}>
+                    <strong style={{ color: '#0288d1' }}>🏢 {cust.name}</strong><br />
+                    <span>📍 {cust.address || 'Adres belirtilmedi'}</span><br />
+                    <span>Yarıçap: {cust.radius || 150}m</span><br />
+                    <button
+                      onClick={() => handleDeleteCustomer(cust.id)}
+                      style={{ marginTop: '6px', padding: '3px 8px', backgroundColor: '#fce8e6', color: '#d93025', border: '1px solid #fad2cf', borderRadius: '4px', cursor: 'pointer', fontSize: '11px', fontWeight: 'bold' }}
+                    >
+                      🗑️ Müşteriyi Sil
+                    </button>
+                  </div>
+                </Popup>
+              </Marker>
+              <Circle
+                center={[cust.latitude, cust.longitude]}
+                radius={cust.radius || 150}
+                pathOptions={{ color: '#0288d1', fillColor: '#0288d1', fillOpacity: 0.1, dashArray: '4, 4' }}
+              />
+            </React.Fragment>
+          ))}
+
+          {/* Fotoğraflı Saha Raporu İğneleri */}
+          {fieldReports.map((rep, idx) => (
+            <Marker key={`rep-${idx}`} position={[rep.latitude, rep.longitude]} icon={reportPhotoIcon}>
+              <Popup>
+                <div style={{ fontSize: '12px', maxWidth: '200px' }}>
+                  <strong style={{ color: '#673ab7' }}>📸 Saha Raporu: {rep.userId}</strong><br />
+                  <small>{new Date(rep.timestamp).toLocaleString('tr-TR')}</small><br />
+                  {rep.note && (
+                    <div style={{ margin: '6px 0', fontStyle: 'italic', background: '#f1f3f4', padding: '4px', borderRadius: '4px' }}>
+                      "{rep.note}"
+                    </div>
+                  )}
+                  <img
+                    src={rep.photo}
+                    alt="Saha Fotoğrafı"
+                    style={{ width: '100%', borderRadius: '6px', marginTop: '4px', cursor: 'pointer' }}
+                    onClick={() => setSelectedReportPhoto(rep)}
+                  />
+                </div>
+              </Popup>
+            </Marker>
+          ))}
 
           {/* Coğrafi Çit Çemberleri */}
           {geofences.map((fence) => (
@@ -1670,6 +1909,139 @@ export default function App() {
               <button onClick={handleAddGeofence} style={{ flex: 1, padding: '10px', backgroundColor: '#f2994a', color: 'white', border: 'none', borderRadius: '6px', fontWeight: 'bold', cursor: 'pointer' }}>Alanı Kaydet</button>
               <button onClick={() => setShowFenceModal(false)} style={{ padding: '10px', backgroundColor: '#eee', border: 'none', borderRadius: '6px', cursor: 'pointer' }}>İptal</button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* MÜŞTERİ / ŞANTİYE (POI) EKLEME MODAL */}
+      {showCustomerModal && (
+        <div style={{ position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', backgroundColor: 'rgba(0,0,0,0.5)', zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <div style={{ backgroundColor: 'white', padding: '24px', borderRadius: '12px', width: '360px', boxShadow: '0 4px 20px rgba(0,0,0,0.2)' }}>
+            <h3 style={{ margin: '0 0 10px 0', fontSize: '17px', color: '#0288d1' }}>🏢 Yeni Müşteri / Şantiye (POI)</h3>
+            <p style={{ fontSize: '12px', color: '#666', marginBottom: '12px' }}>
+              Personel bu noktaya vardığında sistem otomatik ziyaret girişi (Check-in), ayrıldığında ise kalış süresini kaydeder.
+            </p>
+            <label style={{ fontSize: '12px', fontWeight: 'bold' }}>Müşteri / Şantiye Adı:</label>
+            <input
+              type="text"
+              value={newCustName}
+              onChange={(e) => setNewCustName(e.target.value)}
+              style={{ width: '100%', padding: '8px', marginTop: '4px', marginBottom: '10px', border: '1px solid #ccc', borderRadius: '4px' }}
+            />
+            <label style={{ fontSize: '12px', fontWeight: 'bold' }}>Adres / Açıklama:</label>
+            <input
+              type="text"
+              value={newCustAddress}
+              onChange={(e) => setNewCustAddress(e.target.value)}
+              style={{ width: '100%', padding: '8px', marginTop: '4px', marginBottom: '10px', border: '1px solid #ccc', borderRadius: '4px' }}
+            />
+            <label style={{ fontSize: '12px', fontWeight: 'bold' }}>Algılama Yarıçapı (Metre):</label>
+            <input
+              type="number"
+              value={newCustRadius}
+              onChange={(e) => setNewCustRadius(e.target.value)}
+              style={{ width: '100%', padding: '8px', marginTop: '4px', marginBottom: '16px', border: '1px solid #ccc', borderRadius: '4px' }}
+            />
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <button onClick={handleAddCustomer} style={{ flex: 1, padding: '10px', backgroundColor: '#0288d1', color: 'white', border: 'none', borderRadius: '6px', fontWeight: 'bold', cursor: 'pointer' }}>Müşteriyi Kaydet</button>
+              <button onClick={() => setShowCustomerModal(false)} style={{ padding: '10px', backgroundColor: '#eee', border: 'none', borderRadius: '6px', cursor: 'pointer' }}>İptal</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MÜŞTERİ ZİYARET RAPORLARI MODAL (CHECK-IN / CHECK-OUT) */}
+      {showVisitsModal && (
+        <div style={{ position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', backgroundColor: 'rgba(0,0,0,0.6)', zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '20px' }}>
+          <div style={{ backgroundColor: 'white', padding: '24px', borderRadius: '12px', maxWidth: '640px', width: '100%', maxHeight: '80vh', display: 'flex', flexDirection: 'column', boxShadow: '0 8px 30px rgba(0,0,0,0.3)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px', borderBottom: '1px solid #eee', paddingBottom: '10px' }}>
+              <h3 style={{ margin: 0, color: '#7b1fa2', fontSize: '18px' }}>📋 Otomatik Müşteri Ziyaret Kayıtları</h3>
+              <button onClick={() => setShowVisitsModal(false)} style={{ border: 'none', background: 'none', fontSize: '18px', cursor: 'pointer', color: '#999' }}>✕</button>
+            </div>
+            <div style={{ flex: 1, overflowY: 'auto' }}>
+              {customerVisits.length === 0 ? (
+                <div style={{ textAlign: 'center', padding: '30px', color: '#888', fontSize: '13px' }}>
+                  Henüz müşteri ziyaret kaydı oluşmadı. Personel bir müşteri yarıçapına girip ayrıldığında süre otomatik işlenecektir.
+                </div>
+              ) : (
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px' }}>
+                  <thead>
+                    <tr style={{ backgroundColor: '#f1f3f4', textAlign: 'left', borderBottom: '2px solid #ddd' }}>
+                      <th style={{ padding: '8px' }}>Müşteri</th>
+                      <th style={{ padding: '8px' }}>Personel</th>
+                      <th style={{ padding: '8px' }}>Giriş</th>
+                      <th style={{ padding: '8px' }}>Çıkış</th>
+                      <th style={{ padding: '8px' }}>Süre</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {customerVisits.map((v, i) => (
+                      <tr key={i} style={{ borderBottom: '1px solid #eee' }}>
+                        <td style={{ padding: '8px', fontWeight: 'bold', color: '#0288d1' }}>{v.customerName}</td>
+                        <td style={{ padding: '8px' }}>{v.userId}</td>
+                        <td style={{ padding: '8px' }}>{new Date(v.entryTime).toLocaleTimeString()}</td>
+                        <td style={{ padding: '8px' }}>{v.exitTime ? new Date(v.exitTime).toLocaleTimeString() : 'Halen Orada'}</td>
+                        <td style={{ padding: '8px', fontWeight: 'bold', color: '#137333' }}>{v.durationMinutes} dk</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+            <button onClick={() => setShowVisitsModal(false)} style={{ marginTop: '14px', padding: '10px', backgroundColor: '#f1f3f4', border: '1px solid #ccc', borderRadius: '6px', fontWeight: 'bold', cursor: 'pointer' }}>Kapat</button>
+          </div>
+        </div>
+      )}
+
+      {/* FOTOĞRAFLI SAHA RAPORLARI GALERİSİ MODAL */}
+      {showReportsGallery && (
+        <div style={{ position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', backgroundColor: 'rgba(0,0,0,0.6)', zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '20px' }}>
+          <div style={{ backgroundColor: 'white', padding: '24px', borderRadius: '12px', maxWidth: '780px', width: '100%', maxHeight: '85vh', display: 'flex', flexDirection: 'column', boxShadow: '0 8px 30px rgba(0,0,0,0.3)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px', borderBottom: '1px solid #eee', paddingBottom: '10px' }}>
+              <h3 style={{ margin: 0, color: '#673ab7', fontSize: '18px' }}>📸 Fotoğraflı Saha İşi & Teslimat Tutanakları ({fieldReports.length})</h3>
+              <button onClick={() => setShowReportsGallery(false)} style={{ border: 'none', background: 'none', fontSize: '18px', cursor: 'pointer', color: '#999' }}>✕</button>
+            </div>
+            <div style={{ flex: 1, overflowY: 'auto' }}>
+              {fieldReports.length === 0 ? (
+                <div style={{ textAlign: 'center', padding: '40px', color: '#888', fontSize: '13px' }}>
+                  Henüz fotoğraflı saha raporu yüklenmedi. Personel mobilden (`/takip.html`) fotoğraf çektiğinde burada listelenir.
+                </div>
+              ) : (
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: '14px' }}>
+                  {fieldReports.map((rep, idx) => (
+                    <div key={idx} style={{ border: '1px solid #e0e0e0', borderRadius: '8px', overflow: 'hidden', backgroundColor: '#fdfdfd' }}>
+                      <img
+                        src={rep.photo}
+                        alt="Rapor"
+                        style={{ width: '100%', height: '140px', objectFit: 'cover', cursor: 'pointer' }}
+                        onClick={() => setSelectedReportPhoto(rep)}
+                      />
+                      <div style={{ padding: '8px', fontSize: '12px' }}>
+                        <div style={{ fontWeight: 'bold', color: '#1a73e8' }}>{rep.userId}</div>
+                        <div style={{ color: '#888', fontSize: '11px' }}>{new Date(rep.timestamp).toLocaleString('tr-TR')}</div>
+                        {rep.note && <div style={{ marginTop: '4px', fontStyle: 'italic', color: '#333' }}>"{rep.note}"</div>}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+            <button onClick={() => setShowReportsGallery(false)} style={{ marginTop: '14px', padding: '10px', backgroundColor: '#f1f3f4', border: '1px solid #ccc', borderRadius: '6px', fontWeight: 'bold', cursor: 'pointer' }}>Kapat</button>
+          </div>
+        </div>
+      )}
+
+      {/* BÜYÜK FOTOĞRAF ÖNİZLEME MODAL */}
+      {selectedReportPhoto && (
+        <div style={{ position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', backgroundColor: 'rgba(0,0,0,0.85)', zIndex: 100000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '20px' }}>
+          <div style={{ backgroundColor: 'white', borderRadius: '12px', padding: '16px', maxWidth: '600px', width: '95%', textAlign: 'center' }}>
+            <img src={selectedReportPhoto.photo} alt="Önizleme" style={{ maxWidth: '100%', maxHeight: '65vh', borderRadius: '8px' }} />
+            <div style={{ marginTop: '10px', textAlign: 'left', fontSize: '13px' }}>
+              <strong>Personel:</strong> {selectedReportPhoto.userId}<br />
+              <strong>Tarih:</strong> {new Date(selectedReportPhoto.timestamp).toLocaleString('tr-TR')}<br />
+              {selectedReportPhoto.note && <div><strong>Not:</strong> {selectedReportPhoto.note}</div>}
+            </div>
+            <button onClick={() => setSelectedReportPhoto(null)} style={{ marginTop: '12px', padding: '8px 20px', backgroundColor: '#1a73e8', color: 'white', border: 'none', borderRadius: '6px', fontWeight: 'bold', cursor: 'pointer' }}>Kapat</button>
           </div>
         </div>
       )}

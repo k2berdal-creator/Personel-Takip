@@ -9,7 +9,8 @@ const db = require('./db');
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '20mb' }));
+app.use(express.urlencoded({ extended: true, limit: '20mb' }));
 
 // HTML sayfaları için tarayıcı önbelleğini engelle (Canlı sürüm garantisi)
 app.use((req, res, next) => {
@@ -38,6 +39,11 @@ const io = new Server(server, {
 
 // RAM onbellegi (Hizli erisim icin)
 const activeLocations = {};
+
+// Akilli Saha ve Guvenlik Takipcileri
+const activeCustomerVisits = {}; // { [userId]: { customerId, customerName, entryTime } }
+const lastSpeedRecord = {};      // { [userId]: { speed, time } }
+const stillnessTracker = {};      // { [userId]: { lat, lon, since } }
 
 // Sunucu acildiginda DB'deki son bilinen durumlari onbellegi yukle
 try {
@@ -90,6 +96,123 @@ function processLocation(userId, lat, lon, speed = 0, battery = 100, timestamp =
       });
     }
   });
+
+  // 1. Müşteri / Şantiye (POI) Otomatik Giriş-Çıkış (Check-in / Check-out)
+  try {
+    const customers = db.getCustomers();
+    let currentInCustomer = null;
+
+    customers.forEach((cust) => {
+      const d = db.calculateDistanceMeters(payload.latitude, payload.longitude, cust.latitude, cust.longitude);
+      if (d <= (cust.radius || 150)) {
+        currentInCustomer = cust;
+      }
+    });
+
+    const activeVisit = activeCustomerVisits[userId];
+
+    if (currentInCustomer) {
+      if (!activeVisit || activeVisit.customerId !== currentInCustomer.id) {
+        // Yeni müşteri alanına giriş yaptı
+        activeCustomerVisits[userId] = {
+          customerId: currentInCustomer.id,
+          customerName: currentInCustomer.name,
+          entryTime: ts
+        };
+        io.emit('customerVisitAlert', {
+          type: 'CHECK_IN',
+          userId,
+          customerName: currentInCustomer.name,
+          time: ts
+        });
+        console.log(`[🏢 CHECK-IN] ${userId} -> ${currentInCustomer.name} noktasına giriş yaptı.`);
+      }
+    } else if (activeVisit) {
+      // Müşteri noktasından çıktı -> Ziyaret süresini kaydet
+      const entryDate = new Date(activeVisit.entryTime).getTime();
+      const exitDate = new Date(ts).getTime();
+      const durationMin = Math.round((exitDate - entryDate) / (1000 * 60));
+
+      if (durationMin >= 1) { // 1 dakikadan fazla kaldıysa kayda değer
+        db.recordVisit(
+          activeVisit.customerId,
+          activeVisit.customerName,
+          userId,
+          activeVisit.entryTime,
+          ts,
+          durationMin
+        );
+        io.emit('customerVisitAlert', {
+          type: 'CHECK_OUT',
+          userId,
+          customerName: activeVisit.customerName,
+          durationMinutes: durationMin,
+          time: ts
+        });
+        console.log(`[🏢 CHECK-OUT] ${userId} -> ${activeVisit.customerName} ziyaretini tamamladı (${durationMin} dk).`);
+      }
+      delete activeCustomerVisits[userId];
+    }
+  } catch (e) {}
+
+  // 2. Sürüş Güvenliği (Ani İvmelenme / Sert Fren Tespiti)
+  try {
+    const nowTime = new Date(ts).getTime();
+    if (lastSpeedRecord[userId]) {
+      const prev = lastSpeedRecord[userId];
+      const dt = (nowTime - prev.time) / 1000;
+      if (dt > 0.5 && dt < 8) {
+        const dSpeed = (spd - prev.speed) / dt;
+        if (dSpeed > 18) {
+          io.emit('drivingAlert', {
+            type: 'HARSH_ACCEL',
+            userId,
+            speed: spd,
+            msg: `⚠️ ANİ HIZLANMA: ${userId} (${Math.round(spd)} km/s)`,
+            timestamp: ts
+          });
+        } else if (dSpeed < -22) {
+          io.emit('drivingAlert', {
+            type: 'HARSH_BRAKE',
+            userId,
+            speed: spd,
+            msg: `🛑 SERT FREN: ${userId} (${Math.round(spd)} km/s)`,
+            timestamp: ts
+          });
+        }
+      }
+    }
+    lastSpeedRecord[userId] = { speed: spd, time: nowTime };
+  } catch (e) {}
+
+  // 3. Hareketsizlik Uyarısı (Man-Down / Still Alert)
+  try {
+    const shift = db.isWithinShift();
+    if (shift.inShift) {
+      const nowTime = new Date(ts).getTime();
+      if (!stillnessTracker[userId]) {
+        stillnessTracker[userId] = { lat, lon, since: nowTime, alerted: false };
+      } else {
+        const distMoved = db.calculateDistanceMeters(lat, lon, stillnessTracker[userId].lat, stillnessTracker[userId].lon);
+        if (distMoved < 15 && spd < 3) {
+          const stillMinutes = (nowTime - stillnessTracker[userId].since) / (1000 * 60);
+          if (stillMinutes >= 20 && !stillnessTracker[userId].alerted) {
+            stillnessTracker[userId].alerted = true;
+            io.emit('inactivityAlert', {
+              userId,
+              minutes: Math.round(stillMinutes),
+              latitude: lat,
+              longitude: lon,
+              timestamp: ts
+            });
+            console.log(`[🚨 HAREKETSİZLİK] ${userId} ${Math.round(stillMinutes)} dakikadır hareketsiz!`);
+          }
+        } else {
+          stillnessTracker[userId] = { lat, lon, since: nowTime, alerted: false };
+        }
+      }
+    }
+  } catch (e) {}
 
   // Tum panellere canli emit et
   io.emit('locationUpdate', payload);
@@ -288,6 +411,133 @@ app.post('/update', (req, res) => {
   res.status(200).json({ status: 'OK', data: payload });
 });
 
+// 8.1 Cevrimdisi Kara Kutu: Toplu Konum Kurtarma (Offline Store & Forward)
+app.post('/update-batch', (req, res) => {
+  const { points } = req.body;
+  if (!Array.isArray(points) || points.length === 0) {
+    return res.status(400).json({ error: 'Geçersiz veri' });
+  }
+
+  let count = 0;
+  points.forEach((p) => {
+    if (p.lat && p.lon && p.id) {
+      processLocation(p.id, p.lat, p.lon, p.speed || 0, p.battery || 100, p.timestamp);
+      count++;
+    }
+  });
+
+  console.log(`[📦 KARA KUTU KURTARMA] ${count} adet çevrimdışı konum başarıyla işlendi.`);
+  res.json({ status: 'OK', processedCount: count });
+});
+
+// 8.2 Müşteri & Şantiye Noktaları (POI)
+app.get('/api/customers', (req, res) => {
+  res.json(db.getCustomers());
+});
+
+app.post('/api/customers', (req, res) => {
+  const { name, address, latitude, longitude, radius } = req.body;
+  if (!name || !latitude || !longitude) {
+    return res.status(400).json({ error: 'Eksik bilgi' });
+  }
+  const updated = db.addCustomer(name, address, latitude, longitude, radius || 150);
+  io.emit('customersUpdate', updated);
+  res.json(updated);
+});
+
+app.delete('/api/customers/:id', (req, res) => {
+  const updated = db.deleteCustomer(req.params.id);
+  io.emit('customersUpdate', updated);
+  res.json(updated);
+});
+
+app.get('/api/visits', (req, res) => {
+  res.json(db.getVisits(req.query.date, req.query.userId));
+});
+
+// 8.3 Fotoğraflı Saha Raporu / Teslimat Tutanağı
+app.post('/api/upload-report', (req, res) => {
+  const { userId, photo, note, latitude, longitude, timestamp } = req.body;
+  if (!userId || !photo) {
+    return res.status(400).json({ error: 'Fotoğraf ve personel adı zorunludur' });
+  }
+  const ts = timestamp || new Date().toISOString();
+  db.saveFieldReport(userId, photo, note, latitude, longitude, ts);
+
+  const reportPayload = {
+    userId,
+    photo,
+    note,
+    latitude: Number(latitude),
+    longitude: Number(longitude),
+    timestamp: ts
+  };
+  io.emit('newFieldReport', reportPayload);
+  console.log(`[📸 SAHA RAPORU] ${userId} fotoğraf yükledi: "${note || 'Not yok'}"`);
+  res.json({ status: 'OK', data: reportPayload });
+});
+
+app.get('/api/reports', (req, res) => {
+  res.json(db.getFieldReports());
+});
+
+// 8.4 Müşteriye Özel Canlı Takip Sayfası
+app.get('/track/:userId', (req, res) => {
+  const targetUser = req.params.userId;
+  const userLoc = activeLocations[targetUser] || { latitude: 41.04239, longitude: 28.68986, speed: 0 };
+
+  const html = `<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Canlı Görev & Teslimat Takibi</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="/socket.io/socket.io.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, sans-serif; }
+    #map { height: 100vh; width: 100vw; }
+    .card { position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); z-index: 1000; background: white; border-radius: 14px; padding: 16px 20px; box-shadow: 0 4px 20px rgba(0,0,0,0.25); width: 90%; max-width: 400px; text-align: center; }
+    h2 { font-size: 16px; color: #1a73e8; margin-bottom: 6px; }
+    .badge { display: inline-block; padding: 4px 10px; background: #e6f4ea; color: #137333; font-weight: bold; font-size: 12px; border-radius: 12px; }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <div class="card">
+    <h2>🚚 ${targetUser} Yolda</h2>
+    <div class="badge" id="speed-badge">Hız: ${Math.round(userLoc.speed || 0)} km/s</div>
+    <div style="font-size: 12px; color: #5f6368; margin-top: 8px;" id="status-text">Canlı konum izleniyor...</div>
+  </div>
+  <script>
+    const map = L.map('map').setView([${userLoc.latitude}, ${userLoc.longitude}], 15);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+
+    const carIcon = L.divIcon({
+      html: '<div style="font-size: 28px; text-shadow: 0 2px 6px rgba(0,0,0,0.3);">🚗</div>',
+      className: '',
+      iconSize: [32, 32],
+      iconAnchor: [16, 16]
+    });
+
+    const marker = L.marker([${userLoc.latitude}, ${userLoc.longitude}], { icon: carIcon }).addTo(map);
+    const socket = io();
+
+    socket.on('locationUpdate', (data) => {
+      if (data.userId === '${targetUser}') {
+        marker.setLatLng([data.latitude, data.longitude]);
+        map.panTo([data.latitude, data.longitude]);
+        document.getElementById('speed-badge').textContent = 'Hız: ' + Math.round(data.speed) + ' km/s';
+        document.getElementById('status-text').textContent = 'Son güncelleme: ' + new Date(data.timestamp).toLocaleTimeString();
+      }
+    });
+  </script>
+</body>
+</html>`;
+  res.send(html);
+});
+
 // 9. Socket.io baglantilari
 io.on('connection', (socket) => {
   console.log('Yeni soket baglantisi:', socket.id);
@@ -352,6 +602,7 @@ app.use((req, res, next) => {
     req.path.startsWith('/geofences') ||
     req.path.startsWith('/update') ||
     req.path.startsWith('/sos') ||
+    req.path.startsWith('/track') ||
     req.path.startsWith('/takip') ||
     req.path.startsWith('/manifest') ||
     req.path.startsWith('/sw.js') ||

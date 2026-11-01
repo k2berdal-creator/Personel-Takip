@@ -42,6 +42,38 @@ try {
       endTime TEXT NOT NULL,
       blockOffShift INTEGER DEFAULT 1
     );
+
+    CREATE TABLE IF NOT EXISTS customers (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      address TEXT DEFAULT '',
+      latitude REAL NOT NULL,
+      longitude REAL NOT NULL,
+      radius REAL DEFAULT 150,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS field_reports (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      userId TEXT NOT NULL,
+      photo TEXT NOT NULL,
+      note TEXT DEFAULT '',
+      latitude REAL NOT NULL,
+      longitude REAL NOT NULL,
+      timestamp TEXT NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS customer_visits (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      customerId INTEGER,
+      customerName TEXT NOT NULL,
+      userId TEXT NOT NULL,
+      entryTime TEXT NOT NULL,
+      exitTime TEXT,
+      durationMinutes INTEGER DEFAULT 0,
+      date TEXT NOT NULL
+    );
   `);
 
   // Varsayilan mesai saatleri ekle (Pazartesi-Cuma: 08:30 - 18:00)
@@ -310,6 +342,125 @@ function deleteGeofence(id) {
   return getGeofences();
 }
 
+// 8. Müşteri & Şantiye Noktaları (POI)
+function getCustomers() {
+  if (db && !useJsonFallback) {
+    return db.prepare('SELECT * FROM customers ORDER BY id DESC').all();
+  } else {
+    try {
+      const data = JSON.parse(fs.readFileSync(jsonDbPath, 'utf8'));
+      return data.customers || [];
+    } catch (e) {
+      return [];
+    }
+  }
+}
+
+function addCustomer(name, address, latitude, longitude, radius = 150) {
+  const lat = Number(latitude);
+  const lon = Number(longitude);
+  const rad = Number(radius) || 150;
+
+  if (db && !useJsonFallback) {
+    const stmt = db.prepare('INSERT INTO customers (name, address, latitude, longitude, radius) VALUES (?, ?, ?, ?, ?)');
+    stmt.run(name, address || '', lat, lon, rad);
+  } else {
+    try {
+      const data = JSON.parse(fs.readFileSync(jsonDbPath, 'utf8'));
+      data.customers = data.customers || [];
+      data.customers.push({ id: Date.now(), name, address: address || '', latitude: lat, longitude: lon, radius: rad });
+      fs.writeFileSync(jsonDbPath, JSON.stringify(data, null, 2));
+    } catch (e) {}
+  }
+  return getCustomers();
+}
+
+function deleteCustomer(id) {
+  if (db && !useJsonFallback) {
+    db.prepare('DELETE FROM customers WHERE id = ?').run(id);
+  } else {
+    try {
+      const data = JSON.parse(fs.readFileSync(jsonDbPath, 'utf8'));
+      data.customers = (data.customers || []).filter((c) => c.id != id);
+      fs.writeFileSync(jsonDbPath, JSON.stringify(data, null, 2));
+    } catch (e) {}
+  }
+  return getCustomers();
+}
+
+// 9. Fotoğraflı Saha Raporları
+function saveFieldReport(userId, photo, note = '', latitude, longitude, timestamp = null) {
+  const ts = timestamp || new Date().toISOString();
+  const lat = Number(latitude);
+  const lon = Number(longitude);
+
+  if (db && !useJsonFallback) {
+    const stmt = db.prepare(`
+      INSERT INTO field_reports (userId, photo, note, latitude, longitude, timestamp)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `);
+    stmt.run(userId, photo, note, lat, lon, ts);
+  } else {
+    try {
+      const data = JSON.parse(fs.readFileSync(jsonDbPath, 'utf8'));
+      data.field_reports = data.field_reports || [];
+      data.field_reports.push({ id: Date.now(), userId, photo, note, latitude: lat, longitude: lon, timestamp: ts });
+      if (data.field_reports.length > 500) data.field_reports.shift();
+      fs.writeFileSync(jsonDbPath, JSON.stringify(data, null, 2));
+    } catch (e) {}
+  }
+}
+
+function getFieldReports(limit = 100) {
+  if (db && !useJsonFallback) {
+    return db.prepare('SELECT * FROM field_reports ORDER BY id DESC LIMIT ?').all(limit);
+  } else {
+    try {
+      const data = JSON.parse(fs.readFileSync(jsonDbPath, 'utf8'));
+      return (data.field_reports || []).slice(-limit).reverse();
+    } catch (e) {
+      return [];
+    }
+  }
+}
+
+// 10. Otomatik Müşteri Ziyaret Kayıtları (Check-in / Check-out)
+function recordVisit(customerId, customerName, userId, entryTime, exitTime, durationMinutes, date = null) {
+  const d = date || new Date().toISOString().slice(0, 10);
+  if (db && !useJsonFallback) {
+    const stmt = db.prepare(`
+      INSERT INTO customer_visits (customerId, customerName, userId, entryTime, exitTime, durationMinutes, date)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+    stmt.run(customerId, customerName, userId, entryTime, exitTime, durationMinutes, d);
+  } else {
+    try {
+      const data = JSON.parse(fs.readFileSync(jsonDbPath, 'utf8'));
+      data.customer_visits = data.customer_visits || [];
+      data.customer_visits.push({ id: Date.now(), customerId, customerName, userId, entryTime, exitTime, durationMinutes, date: d });
+      fs.writeFileSync(jsonDbPath, JSON.stringify(data, null, 2));
+    } catch (e) {}
+  }
+}
+
+function getVisits(date = null, userId = null) {
+  if (db && !useJsonFallback) {
+    let sql = 'SELECT * FROM customer_visits WHERE 1=1';
+    const params = [];
+    if (date) { sql += ' AND date = ?'; params.push(date); }
+    if (userId) { sql += ' AND userId = ?'; params.push(userId); }
+    sql += ' ORDER BY id DESC LIMIT 200';
+    return db.prepare(sql).all(...params);
+  } else {
+    try {
+      const data = JSON.parse(fs.readFileSync(jsonDbPath, 'utf8'));
+      return (data.customer_visits || []).filter(v => (!date || v.date === date) && (!userId || v.userId === userId));
+    } catch (e) {
+      return [];
+    }
+  }
+}
+
 module.exports = {
   saveLocation,
   getLatestLocations,
@@ -321,5 +472,12 @@ module.exports = {
   getGeofences,
   addGeofence,
   deleteGeofence,
-  calculateDistanceMeters
+  calculateDistanceMeters,
+  getCustomers,
+  addCustomer,
+  deleteCustomer,
+  saveFieldReport,
+  getFieldReports,
+  recordVisit,
+  getVisits
 };

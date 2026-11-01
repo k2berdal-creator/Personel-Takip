@@ -58,8 +58,21 @@
       <p id="notice-text">Lütfen merkezi arayın.</p>
     </div>
 
-    <label for="user-id">Personel Adı / Kod:</label>
-    <input type="text" id="user-id" value="Saha_Personeli_1" placeholder="Örn: Ahmet_Kaya">
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+      <div>
+        <label for="user-id">Personel Kodu:</label>
+        <input type="text" id="user-id" value="Saha_Personeli_1" placeholder="Örn: Ahmet_Kaya">
+      </div>
+      <div>
+        <label for="user-dept">Departman / Ekip:</label>
+        <select id="user-dept" style="width: 100%; padding: 12px; border: 1px solid #dadce0; border-radius: 8px; font-size: 13px; margin-bottom: 12px; background: white;">
+          <option value="Teknik Servis">🔧 Teknik Servis</option>
+          <option value="Satış Ekibi">💼 Satış Ekibi</option>
+          <option value="Sevkiyat & Depo">🚚 Sevkiyat & Depo</option>
+          <option value="Genel">🏢 Genel Saha</option>
+        </select>
+      </div>
+    </div>
 
     <button id="btn-toggle-tracking" class="btn-success" onclick="toggleTracking()">
       ▶ Gerçek GPS Takibini Başlat
@@ -83,8 +96,22 @@
       🚨 SOS / ACİL DURUM BİLDİR
     </button>
 
+    <!-- Fotoğraflı Saha Raporu / Teslimat Tutanağı -->
+    <div style="margin-top: 14px; padding: 12px; background: #f8f9fa; border-radius: 10px; border: 1px solid #dadce0;">
+      <div style="font-size: 13px; font-weight: bold; color: #202124; margin-bottom: 6px;">
+        📸 Fotoğraflı Saha / Teslimat Raporu
+      </div>
+      <input type="file" id="report-photo" accept="image/*" capture="environment" style="font-size: 12px; margin-bottom: 8px;">
+      <input type="text" id="report-note" placeholder="Teslimat / montaj notu yazın..." style="font-size: 13px; margin-bottom: 8px;">
+      <button type="button" class="btn-primary" onclick="uploadFieldReport()" style="padding: 10px; font-size: 13px; margin: 0;">
+        📤 Raporu Merkeze Gönder
+      </button>
+      <div id="report-status-text" style="font-size: 11px; color: #137333; font-weight: bold; margin-top: 6px; display: none;"></div>
+    </div>
+
     <div class="info-box" style="margin-top: 14px;">
       <div><strong>Pil Koruma:</strong> <span id="battery-mode" class="mode-pill idle">🔋 Akıllı Mod Aktif</span></div>
+      <div><strong>Kara Kutu:</strong> <span id="offline-queue-badge" class="mode-pill idle">📦 Kuyruk: 0 nokta</span></div>
       <div><strong>Son İletilen:</strong> <span id="last-coords">Henüz gönderilmedi</span></div>
       <div><strong>Hız:</strong> <span id="current-speed">0 km/s</span></div>
       <div><strong>Saat:</strong> <span id="last-time">-</span></div>
@@ -179,9 +206,11 @@
       lastSentTime = now;
 
       const userId = userIdInput.value.trim() || 'Saha_Personeli';
+      const userDept = (document.getElementById('user-dept') && document.getElementById('user-dept').value) || 'Genel';
       const timeStr = new Date().toLocaleTimeString();
       const payload = {
         userId: userId,
+        department: userDept,
         latitude: lat,
         longitude: lon,
         speed: speedKm,
@@ -196,7 +225,7 @@
       fetch('/update', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: userId, lat: lat, lon: lon, speed: speedKm, battery: currentBattery })
+        body: JSON.stringify({ id: userId, dept: userDept, lat: lat, lon: lon, speed: speedKm, battery: currentBattery })
       })
       .then(r => r.json())
       .then((data) => {
@@ -212,7 +241,8 @@
         }
       })
       .catch((e) => {
-        statusMsgSpan.textContent = 'Gönderim hatası: ' + e.message;
+        statusMsgSpan.textContent = 'İnternet kesildi -> Kara Kutuya yazıldı';
+        queueOfflineLocation({ id: userId, lat, lon, speed: speedKm, battery: currentBattery, timestamp: new Date().toISOString() });
       });
     }
 
@@ -347,6 +377,93 @@
         setTimeout(() => osc.stop(), 300);
       } catch (e) {}
     });
+
+    // Kara Kutu (Offline Store & Forward Kuyruğu)
+    let offlineQueue = [];
+    try {
+      offlineQueue = JSON.parse(localStorage.getItem('pt_offline_queue') || '[]');
+    } catch (e) { offlineQueue = []; }
+
+    function updateQueueBadge() {
+      const b = document.getElementById('offline-queue-badge');
+      if (!b) return;
+      b.textContent = `📦 Kuyruk: ${offlineQueue.length} nokta`;
+      b.className = offlineQueue.length > 0 ? 'mode-pill moving' : 'mode-pill idle';
+    }
+    updateQueueBadge();
+
+    function queueOfflineLocation(pt) {
+      offlineQueue.push(pt);
+      if (offlineQueue.length > 600) offlineQueue.shift();
+      try { localStorage.setItem('pt_offline_queue', JSON.stringify(offlineQueue)); } catch (e) {}
+      updateQueueBadge();
+    }
+
+    function flushOfflineQueue() {
+      if (!navigator.onLine || offlineQueue.length === 0) return;
+      const toSend = [...offlineQueue];
+      fetch('/update-batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ points: toSend })
+      })
+      .then(r => r.json())
+      .then(res => {
+        if (res.status === 'OK') {
+          offlineQueue = [];
+          localStorage.removeItem('pt_offline_queue');
+          updateQueueBadge();
+          statusMsgSpan.textContent = `📦 Kara Kutu: ${res.processedCount} nokta merkeze senkronize edildi.`;
+        }
+      })
+      .catch(() => {});
+    }
+
+    window.addEventListener('online', flushOfflineQueue);
+    setInterval(flushOfflineQueue, 15000);
+
+    // Fotoğraflı Saha Raporu Yükleme
+    function uploadFieldReport() {
+      const fileInput = document.getElementById('report-photo');
+      const noteInput = document.getElementById('report-note');
+      const statusDiv = document.getElementById('report-status-text');
+      const userId = userIdInput.value.trim() || 'Saha_Personeli_1';
+
+      if (!fileInput.files || fileInput.files.length === 0) {
+        alert('Lütfen fotoğraf seçin veya kamerayı açın.');
+        return;
+      }
+
+      const file = fileInput.files[0];
+      statusDiv.style.display = 'block';
+      statusDiv.textContent = 'Fotoğraf yükleniyor...';
+
+      const reader = new FileReader();
+      reader.onload = function(e) {
+        fetch('/api/upload-report', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            userId: userId,
+            photo: e.target.result,
+            note: noteInput.value.trim(),
+            latitude: lastSentLat || 41.04239,
+            longitude: lastSentLon || 28.68986
+          })
+        })
+        .then(r => r.json())
+        .then(() => {
+          statusDiv.textContent = '✓ Fotoğraf ve saha raporu merkeze başarıyla iletildi!';
+          noteInput.value = '';
+          fileInput.value = '';
+          setTimeout(() => { statusDiv.style.display = 'none'; }, 4000);
+        })
+        .catch(err => {
+          statusDiv.textContent = 'Yükleme hatası: ' + err.message;
+        });
+      };
+      reader.readAsDataURL(file);
+    }
 
     // PWA Service Worker Kaydı
     if ('serviceWorker' in navigator) {
