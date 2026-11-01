@@ -54,6 +54,30 @@ function playBeep(freq = 880, duration = 0.25) {
   } catch (e) {}
 }
 
+// Siren Alarmı (SOS Acil Durum)
+function playSiren() {
+  try {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) return;
+    const ctx = new AudioCtx();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.type = 'sawtooth';
+    const now = ctx.currentTime;
+    osc.frequency.setValueAtTime(500, now);
+    osc.frequency.linearRampToValueAtTime(1100, now + 0.3);
+    osc.frequency.linearRampToValueAtTime(500, now + 0.6);
+    osc.frequency.linearRampToValueAtTime(1100, now + 0.9);
+    osc.frequency.linearRampToValueAtTime(500, now + 1.2);
+    gain.gain.setValueAtTime(0.4, now);
+    gain.gain.exponentialRampToValueAtTime(0.01, now + 1.5);
+    osc.start(now);
+    osc.stop(now + 1.5);
+  } catch (e) {}
+}
+
 // İki koordinat arası metre mesafesi (Haversine)
 function calculateDistanceMeters(lat1, lon1, lat2, lon2) {
   const R = 6371e3;
@@ -162,7 +186,7 @@ const MAP_LAYERS = {
   dark: {
     name: '🌙 Gece',
     url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
-    attribution: '&copy; OpenStreetMap'
+    attribution: '&copy; OpenStreetMap Gece Modu'
   }
 };
 
@@ -182,6 +206,14 @@ const playbackVehicleIcon = L.divIcon({
   iconAnchor: [17, 17]
 });
 
+// SOS Acil Durum İkonu
+const sosMarkerIcon = L.divIcon({
+  className: 'speed-alert',
+  html: `<div style="background-color: #d93025; color: white; width: 38px; height: 38px; border-radius: 50%; display: flex; align-items: center; justify-content: center; border: 3px solid white; box-shadow: 0 0 15px rgba(217,48,37,0.9); font-size: 20px;">🚨</div>`,
+  iconSize: [38, 38],
+  iconAnchor: [19, 19]
+});
+
 export default function App() {
   // 1. Güvenlik / Şifre Girişi
   const [isAuthenticated, setIsAuthenticated] = useState(() => {
@@ -196,7 +228,8 @@ export default function App() {
   const [isConnected, setIsConnected] = useState(socket.connected);
   const [showQr, setShowQr] = useState(false);
 
-  // 3. Rota & Duraklamalar
+  // 3. Rota, Tarih Seçici & Duraklamalar
+  const [selectedDate, setSelectedDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [rawHistory, setRawHistory] = useState([]);
   const [routePoints, setRoutePoints] = useState([]);
   const [stops, setStops] = useState([]);
@@ -214,11 +247,15 @@ export default function App() {
   // 5. Harita Katmanı (Sokak / Uydu / Gece)
   const [currentLayer, setCurrentLayer] = useState('standard');
 
-  // 6. Hız Aşımı Ayarları & Uyarılar
+  // 6. Hız Aşımı & Alarmlar
   const [speedLimit, setSpeedLimit] = useState(80);
   const [alerts, setAlerts] = useState([]);
 
-  // 7. Çit & Mesai
+  // 7. SOS Acil Durum & PDF Rapor Modalları
+  const [sosModalData, setSosModalData] = useState(null);
+  const [showReportModal, setShowReportModal] = useState(false);
+
+  // 8. Çit & Mesai
   const [geofences, setGeofences] = useState([]);
   const [showFenceModal, setShowFenceModal] = useState(false);
   const [newFenceName, setNewFenceName] = useState('Merkez Şantiye');
@@ -252,6 +289,34 @@ export default function App() {
     setInputPassword('');
   };
 
+  // Tarih ve Personel Geçmişini Yükle
+  const loadPersonnelHistory = (userId, dateStr) => {
+    if (!userId) return;
+    setIsPlaybackOpen(false);
+    setIsPlaying(false);
+    setPlaybackIndex(0);
+
+    const queryUrl = `${BACKEND_URL}/history/${encodeURIComponent(userId)}?date=${encodeURIComponent(dateStr)}`;
+    fetch(queryUrl)
+      .then((res) => res.json())
+      .then((pts) => {
+        setRawHistory(pts);
+        setRoutePoints(pts.map((p) => [p.latitude, p.longitude]));
+        const detected = detectStops(pts, 4, 35);
+        setStops(detected);
+      })
+      .catch(() => {
+        setRawHistory([]);
+        setRoutePoints([]);
+        setStops([]);
+      });
+
+    fetch(`${BACKEND_URL}/summary/${encodeURIComponent(userId)}?date=${encodeURIComponent(dateStr)}`)
+      .then((res) => res.json())
+      .then((sum) => setUserSummary(sum))
+      .catch(() => setUserSummary(null));
+  };
+
   // Soket ve Veri Dinleyicileri
   useEffect(() => {
     if (!isAuthenticated) return;
@@ -278,7 +343,6 @@ export default function App() {
       if (!data || !data.userId) return;
       const spd = data.speed || 0;
 
-      // Hız Aşımı Kontrolü ve Sesli Uyarı
       if (spd > speedLimit) {
         playBeep(920, 0.4);
         const alertMsg = `⚡ HIZ AŞIMI: ${data.userId} ${Math.round(spd)} km/s ile sınırı (${speedLimit} km/s) aştı!`;
@@ -296,7 +360,9 @@ export default function App() {
         }
       }));
 
-      if (selectedUser === data.userId) {
+      // Eğer seçili gün bugünün tarihiyse rotayı canlı uzat
+      const todayStr = new Date().toISOString().slice(0, 10);
+      if (selectedUser === data.userId && selectedDate === todayStr) {
         setRoutePoints((prev) => [...prev, [data.latitude, data.longitude]]);
         setRawHistory((prev) => [...prev, data]);
       }
@@ -308,6 +374,14 @@ export default function App() {
       setAlerts((prev) => [msg, ...prev.slice(0, 4)]);
     };
 
+    // SOS Çağrısı Geldiğinde Siren Çal ve Modalı Aç
+    const handleSosAlert = (sosData) => {
+      playSiren();
+      setSosModalData(sosData);
+      const msg = `🚨 ACİL DURUM (SOS): ${sosData.userId} YARDIM ÇAĞRISI GÖNDERDİ!`;
+      setAlerts((prev) => [msg, ...prev]);
+    };
+
     const handleGeofencesUpdate = (fences) => setGeofences(fences || []);
     const handleShiftSettingsUpdate = (settings) => setShiftSettings(settings);
 
@@ -316,6 +390,7 @@ export default function App() {
     socket.on('initialLocations', handleInitialLocations);
     socket.on('locationUpdate', handleLocationUpdate);
     socket.on('geofenceAlert', handleGeofenceAlert);
+    socket.on('sosAlert', handleSosAlert);
     socket.on('geofencesUpdate', handleGeofencesUpdate);
     socket.on('shiftSettingsUpdate', handleShiftSettingsUpdate);
 
@@ -330,37 +405,16 @@ export default function App() {
       socket.off('initialLocations', handleInitialLocations);
       socket.off('locationUpdate', handleLocationUpdate);
       socket.off('geofenceAlert', handleGeofenceAlert);
+      socket.off('sosAlert', handleSosAlert);
       socket.off('geofencesUpdate', handleGeofencesUpdate);
       socket.off('shiftSettingsUpdate', handleShiftSettingsUpdate);
     };
-  }, [selectedUser, speedLimit, isAuthenticated]);
+  }, [selectedUser, selectedDate, speedLimit, isAuthenticated]);
 
-  // Personel Seçimi ve Geçmiş Rotası Yükleme
+  // Personel Seçimi
   const selectPersonnel = (userId) => {
     setSelectedUser(userId);
-    setIsPlaybackOpen(false);
-    setIsPlaying(false);
-    setPlaybackIndex(0);
-
-    fetch(`${BACKEND_URL}/history/${encodeURIComponent(userId)}`)
-      .then((res) => res.json())
-      .then((pts) => {
-        setRawHistory(pts);
-        setRoutePoints(pts.map((p) => [p.latitude, p.longitude]));
-        // Duraklama ve molaları tespit et
-        const detected = detectStops(pts, 4, 35);
-        setStops(detected);
-      })
-      .catch(() => {
-        setRawHistory([]);
-        setRoutePoints([]);
-        setStops([]);
-      });
-
-    fetch(`${BACKEND_URL}/summary/${encodeURIComponent(userId)}`)
-      .then((res) => res.json())
-      .then((sum) => setUserSummary(sum))
-      .catch(() => setUserSummary(null));
+    loadPersonnelHistory(userId, selectedDate);
   };
 
   // Rota Oynatma Motoru (Playback Timer)
@@ -383,19 +437,19 @@ export default function App() {
     };
   }, [isPlaying, isPlaybackOpen, playbackSpeed, rawHistory.length]);
 
-  // CSV İndirme
+  // CSV İndirme (Tarih Filtreli)
   const handleDownloadCsv = async (userId) => {
     try {
-      const res = await fetch(`${BACKEND_URL}/export-csv/${encodeURIComponent(userId)}`);
+      const res = await fetch(`${BACKEND_URL}/export-csv/${encodeURIComponent(userId)}?date=${encodeURIComponent(selectedDate)}`);
       if (!res.ok) {
-        alert('Bu personel için henüz kaydedilmiş hareket verisi bulunamadı.');
+        alert('Bu personel için seçili tarihte hareket verisi bulunamadı.');
         return;
       }
       const blob = await res.blob();
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `${userId}_Gecmis_Rota_${new Date().toISOString().slice(0, 10)}.csv`;
+      a.download = `${userId}_Gecmis_Rota_${selectedDate}.csv`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -669,14 +723,28 @@ export default function App() {
               {getSpeedBadge(locations[selectedUser].speed).label}
             </div>
 
+            {/* Tarih Seçici (Date Picker) */}
+            <div style={{ marginTop: '8px', display: 'flex', alignItems: 'center', gap: '6px', backgroundColor: '#ffffff', padding: '6px 8px', borderRadius: '6px', fontSize: '12px', border: '1px solid #dadce0' }}>
+              <span style={{ fontWeight: 'bold', color: '#3c4043' }}>📅 Rota Tarihi:</span>
+              <input
+                type="date"
+                value={selectedDate}
+                onChange={(e) => {
+                  setSelectedDate(e.target.value);
+                  loadPersonnelHistory(selectedUser, e.target.value);
+                }}
+                style={{ flex: 1, padding: '4px', border: '1px solid #ccc', borderRadius: '4px', fontSize: '12px', fontWeight: 'bold' }}
+              />
+            </div>
+
             {userSummary && (
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px', marginTop: '10px', fontSize: '12px', backgroundColor: '#fff', padding: '8px', borderRadius: '6px' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px', marginTop: '8px', fontSize: '12px', backgroundColor: '#fff', padding: '8px', borderRadius: '6px' }}>
                 <div>Toplam: <strong>{userSummary.totalKm} km</strong></div>
                 <div>Max Hız: <strong>{userSummary.maxSpeed} km/s</strong></div>
               </div>
             )}
 
-            {/* Rota, Mola ve Zaman Tüneli Butonları */}
+            {/* Rota ve Mola Gösterim Butonları */}
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px', marginTop: '10px' }}>
               <button
                 onClick={() => setShowRoute(!showRoute)}
@@ -692,26 +760,33 @@ export default function App() {
               </button>
             </div>
 
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px', marginTop: '6px' }}>
+            {/* Canlandırıcı & Raporlama Butonları (Grid) */}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '4px', marginTop: '6px' }}>
               <button
                 onClick={() => {
                   if (rawHistory.length === 0) {
-                    alert('Bu personel için henüz kaydedilmiş rota bulunmuyor.');
+                    alert('Bu personel için seçili tarihte kaydedilmiş rota bulunmuyor.');
                     return;
                   }
                   setIsPlaybackOpen(true);
                   setPlaybackIndex(0);
                   setIsPlaying(true);
                 }}
-                style={{ padding: '8px 4px', backgroundColor: '#673ab7', color: '#fff', border: 'none', borderRadius: '4px', fontSize: '11px', fontWeight: 'bold', cursor: 'pointer' }}
+                style={{ padding: '8px 2px', backgroundColor: '#673ab7', color: '#fff', border: 'none', borderRadius: '4px', fontSize: '11px', fontWeight: 'bold', cursor: 'pointer' }}
               >
-                🎬 Rota Canlandır
+                🎬 Canlandır
               </button>
               <button
                 onClick={() => handleDownloadCsv(selectedUser)}
-                style={{ padding: '8px 4px', backgroundColor: '#137333', color: '#fff', border: 'none', borderRadius: '4px', fontSize: '11px', fontWeight: 'bold', cursor: 'pointer' }}
+                style={{ padding: '8px 2px', backgroundColor: '#137333', color: '#fff', border: 'none', borderRadius: '4px', fontSize: '11px', fontWeight: 'bold', cursor: 'pointer' }}
               >
-                📥 Excel / CSV
+                📥 Excel
+              </button>
+              <button
+                onClick={() => setShowReportModal(true)}
+                style={{ padding: '8px 2px', backgroundColor: '#0288d1', color: '#fff', border: 'none', borderRadius: '4px', fontSize: '11px', fontWeight: 'bold', cursor: 'pointer' }}
+              >
+                📄 PDF Karne
               </button>
             </div>
           </div>
@@ -833,7 +908,7 @@ export default function App() {
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                 <span style={{ fontSize: '13px', fontWeight: 'bold', color: '#1a73e8' }}>
-                  🎬 Rota Canlandırma: {selectedUser}
+                  🎬 Rota Canlandırma: {selectedUser} ({selectedDate})
                 </span>
                 <span style={{ fontSize: '12px', color: '#5f6368', backgroundColor: '#f1f3f4', padding: '2px 8px', borderRadius: '10px' }}>
                   🕒 {rawHistory[playbackIndex]?.timestamp ? new Date(rawHistory[playbackIndex].timestamp).toLocaleTimeString() : '-'}
@@ -975,6 +1050,18 @@ export default function App() {
             </Marker>
           )}
 
+          {/* SOS Acil Durum Özel Marker'ı */}
+          {sosModalData && (
+            <Marker position={[sosModalData.latitude, sosModalData.longitude]} icon={sosMarkerIcon}>
+              <Popup>
+                <strong style={{ color: '#d93025' }}>🚨 ACİL DURUM: {sosModalData.userId}</strong><br />
+                Saat: {new Date(sosModalData.timestamp).toLocaleTimeString()}<br />
+                Enlem: {sosModalData.latitude.toFixed(5)}<br />
+                Boylam: {sosModalData.longitude.toFixed(5)}
+              </Popup>
+            </Marker>
+          )}
+
           {/* Canlı Personel Konum Marker'ları */}
           {!isPlaybackOpen && Object.entries(locations).map(([userId, loc]) => (
             <Marker
@@ -993,6 +1080,169 @@ export default function App() {
           ))}
         </MapContainer>
       </div>
+
+      {/* SOS ACİL DURUM BİLDİRİM MODALI */}
+      {sosModalData && (
+        <div style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          width: '100%',
+          height: '100%',
+          backgroundColor: 'rgba(217, 48, 37, 0.45)',
+          zIndex: 99999,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          backdropFilter: 'blur(3px)'
+        }}>
+          <div style={{
+            backgroundColor: '#ffffff',
+            border: '3px solid #d93025',
+            borderRadius: '16px',
+            padding: '28px',
+            maxWidth: '420px',
+            width: '90%',
+            textAlign: 'center',
+            boxShadow: '0 8px 32px rgba(0,0,0,0.4)'
+          }}>
+            <div style={{ fontSize: '50px', marginBottom: '8px' }}>🚨</div>
+            <h2 style={{ color: '#d93025', margin: '0 0 10px 0', fontSize: '24px' }}>ACİL DURUM ALARMI (SOS)</h2>
+            <p style={{ fontSize: '15px', color: '#202124', margin: '0 0 14px 0' }}>
+              <strong>{sosModalData.userId}</strong> acil yardım çağrısında bulundu!
+            </p>
+            <div style={{ backgroundColor: '#fce8e6', borderRadius: '8px', padding: '12px', textAlign: 'left', fontSize: '13px', marginBottom: '18px', color: '#5f6368', lineHeight: '1.6' }}>
+              <div><strong>Saat:</strong> {new Date(sosModalData.timestamp).toLocaleTimeString()}</div>
+              <div><strong>Koordinat:</strong> {sosModalData.latitude.toFixed(5)}, {sosModalData.longitude.toFixed(5)}</div>
+              <div><strong>Pil Seviyesi:</strong> %{sosModalData.battery || 100}</div>
+            </div>
+
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <button
+                onClick={() => {
+                  setSelectedUser(sosModalData.userId);
+                  setLocations(prev => ({
+                    ...prev,
+                    [sosModalData.userId]: { lat: sosModalData.latitude, lng: sosModalData.longitude, speed: 0, battery: sosModalData.battery, timestamp: sosModalData.timestamp }
+                  }));
+                }}
+                style={{ flex: 1, padding: '12px', backgroundColor: '#1a73e8', color: 'white', border: 'none', borderRadius: '8px', fontWeight: 'bold', cursor: 'pointer' }}
+              >
+                Haritada Odaklan
+              </button>
+              <button
+                onClick={() => setSosModalData(null)}
+                style={{ padding: '12px 20px', backgroundColor: '#d93025', color: 'white', border: 'none', borderRadius: '8px', fontWeight: 'bold', cursor: 'pointer' }}
+              >
+                Sustur & Kapat
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* PDF VARDİYA KARNESİ MODALI (YAZDIRILABİLİR) */}
+      {showReportModal && selectedUser && (
+        <div style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          width: '100%',
+          height: '100%',
+          backgroundColor: 'rgba(0,0,0,0.6)',
+          zIndex: 99999,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          overflowY: 'auto',
+          padding: '20px'
+        }}>
+          <div style={{
+            backgroundColor: '#ffffff',
+            borderRadius: '12px',
+            padding: '30px',
+            maxWidth: '650px',
+            width: '100%',
+            boxShadow: '0 8px 30px rgba(0,0,0,0.3)'
+          }}>
+            {/* Rapor Başlığı */}
+            <div style={{ borderBottom: '2px solid #1a73e8', paddingBottom: '12px', marginBottom: '20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div>
+                <h2 style={{ margin: 0, color: '#1a73e8', fontSize: '20px' }}>PERSONEL GÜNLÜK VARDİYA KARNESİ</h2>
+                <small style={{ color: '#5f6368' }}>Saha Hareket ve Mesai Denetim Raporu</small>
+              </div>
+              <span style={{ fontSize: '13px', fontWeight: 'bold', color: '#202124' }}>Tarih: {selectedDate}</span>
+            </div>
+
+            {/* Personel & Özet Tablosu */}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: '20px', backgroundColor: '#f8f9fa', padding: '16px', borderRadius: '8px' }}>
+              <div><strong>Personel Adı:</strong> {selectedUser}</div>
+              <div><strong>Toplam Mesafe:</strong> {userSummary?.totalKm || '0'} km</div>
+              <div><strong>Maksimum Hız:</strong> {userSummary?.maxSpeed || '0'} km/s</div>
+              <div><strong>Toplam Mola Sayısı:</strong> {stops.length} Adet</div>
+              <div><strong>İlk Sinyal (Mesai Başlangıç):</strong> {userSummary?.startTime ? new Date(userSummary.startTime).toLocaleTimeString() : '-'}</div>
+              <div><strong>Son Sinyal (Mesai Bitiş):</strong> {userSummary?.endTime ? new Date(userSummary.endTime).toLocaleTimeString() : '-'}</div>
+            </div>
+
+            {/* Mola ve Duraklamalar Tablosu */}
+            <h4 style={{ margin: '0 0 8px 0', fontSize: '14px', color: '#202124' }}>Günün Mola ve Duraklamaları ({stops.length}):</h4>
+            {stops.length === 0 ? (
+              <p style={{ fontSize: '12px', color: '#777', marginBottom: '20px' }}>Bu tarihte kayıtlı duraklama/mola tespit edilmedi.</p>
+            ) : (
+              <div style={{ maxHeight: '140px', overflowY: 'auto', marginBottom: '20px', border: '1px solid #eee', borderRadius: '6px' }}>
+                <table style={{ width: '100%', fontSize: '12px', borderCollapse: 'collapse', textAlign: 'left' }}>
+                  <thead>
+                    <tr style={{ backgroundColor: '#f1f3f4', borderBottom: '1px solid #ddd' }}>
+                      <th style={{ padding: '6px 10px' }}>Başlangıç</th>
+                      <th style={{ padding: '6px 10px' }}>Bitiş</th>
+                      <th style={{ padding: '6px 10px' }}>Mola Süresi</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {stops.map((s, idx) => (
+                      <tr key={idx} style={{ borderBottom: '1px solid #eee' }}>
+                        <td style={{ padding: '6px 10px' }}>{new Date(s.startTime).toLocaleTimeString()}</td>
+                        <td style={{ padding: '6px 10px' }}>{new Date(s.endTime).toLocaleTimeString()}</td>
+                        <td style={{ padding: '6px 10px', fontWeight: 'bold', color: '#f2994a' }}>{s.durationMinutes} Dakika</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {/* İmza Alanı */}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '30px', marginTop: '30px', paddingTop: '20px', borderTop: '1px dashed #ccc' }}>
+              <div style={{ textAlign: 'center' }}>
+                <div style={{ fontSize: '12px', fontWeight: 'bold', color: '#555' }}>Teslim Eden Personel</div>
+                <div style={{ height: '40px' }}></div>
+                <div style={{ borderTop: '1px solid #999', fontSize: '11px', color: '#777' }}>İmza</div>
+              </div>
+              <div style={{ textAlign: 'center' }}>
+                <div style={{ fontSize: '12px', fontWeight: 'bold', color: '#555' }}>Saha Yöneticisi / Amir</div>
+                <div style={{ height: '40px' }}></div>
+                <div style={{ borderTop: '1px solid #999', fontSize: '11px', color: '#777' }}>İmza / Kaşe</div>
+              </div>
+            </div>
+
+            {/* Aksiyon Butonları */}
+            <div style={{ display: 'flex', gap: '10px', marginTop: '24px' }}>
+              <button
+                onClick={() => window.print()}
+                style={{ flex: 1, padding: '12px', backgroundColor: '#1a73e8', color: 'white', border: 'none', borderRadius: '8px', fontWeight: 'bold', cursor: 'pointer', fontSize: '14px' }}
+              >
+                🖨️ Yazdır / PDF Olarak Kaydet
+              </button>
+              <button
+                onClick={() => setShowReportModal(false)}
+                style={{ padding: '12px 20px', backgroundColor: '#eee', border: 'none', borderRadius: '8px', fontWeight: 'bold', cursor: 'pointer', fontSize: '14px' }}
+              >
+                Kapat
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* QR MODAL */}
       {showQr && (

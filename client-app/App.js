@@ -214,6 +214,44 @@ export default function App() {
     await sendLocation(baseLat + offsetLat, baseLng + offsetLng);
   };
 
+  // SOS Panik Butonu
+  const triggerSos = async () => {
+    Alert.alert(
+      '🚨 ACİL DURUM (SOS)',
+      'Merkeze acil yardım çağrısı gönderilsin mi?',
+      [
+        { text: 'İptal', style: 'cancel' },
+        {
+          text: 'EVET, GÖNDER',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              let coords = lastCoords;
+              if (!coords) {
+                const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
+                coords = loc.coords;
+              }
+              const cleanUrl = serverUrl.trim().replace(/\/$/, '');
+              await fetch(`${cleanUrl}/sos`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  userId,
+                  latitude: coords.latitude,
+                  longitude: coords.longitude,
+                  timestamp: new Date().toISOString()
+                })
+              });
+              Alert.alert('🚨 İLETİLDİ', 'Acil durum çağrınız sirenle yönetici haritasına iletildi.');
+            } catch (e) {
+              Alert.alert('Hata', 'SOS iletilemedi: ' + e.message);
+            }
+          }
+        }
+      ]
+    );
+  };
+
   return (
     <ScrollView contentContainerStyle={styles.container}>
       <Text style={styles.title}>Personel Takip İstemcisi</Text>
@@ -273,6 +311,13 @@ export default function App() {
           onPress={sendTestLocation}
         >
           <Text style={styles.secondaryButtonText}>📍 Test Konumu Gönder (Simülasyon)</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[styles.button, { backgroundColor: '#d93025', marginTop: 10 }]}
+          onPress={triggerSos}
+        >
+          <Text style={styles.buttonText}>🚨 SOS / ACİL DURUM BİLDİR</Text>
         </TouchableOpacity>
       </View>
 

@@ -7,20 +7,25 @@
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f1f3f4; padding: 20px; }
-    .card { background: white; border-radius: 12px; padding: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); max-width: 420px; margin: 0 auto 16px auto; }
+    .card { background: white; border-radius: 14px; padding: 20px; box-shadow: 0 4px 16px rgba(0,0,0,0.08); max-width: 420px; margin: 0 auto 16px auto; }
     h1 { font-size: 20px; color: #202124; text-align: center; margin-bottom: 12px; }
     .status-badge { display: block; text-align: center; font-size: 13px; font-weight: bold; padding: 6px 12px; border-radius: 20px; margin-bottom: 16px; }
     .online { background: #e6f4ea; color: #137333; }
     .offline { background: #fce8e6; color: #c5221f; }
     label { font-size: 13px; font-weight: 600; color: #5f6368; display: block; margin-bottom: 6px; }
-    input { width: 100%; padding: 12px; border: 1px solid #dadce0; border-radius: 8px; font-size: 15px; margin-bottom: 16px; }
+    input { width: 100%; padding: 12px; border: 1px solid #dadce0; border-radius: 8px; font-size: 15px; margin-bottom: 14px; }
     button { width: 100%; padding: 14px; border: none; border-radius: 8px; font-size: 15px; font-weight: bold; cursor: pointer; margin-bottom: 10px; transition: 0.2s; }
     .btn-primary { background: #1a73e8; color: white; }
     .btn-success { background: #1e8e3e; color: white; }
     .btn-danger { background: #d93025; color: white; }
+    .btn-sos { background: #d93025; color: white; font-size: 16px; padding: 16px; margin-top: 10px; box-shadow: 0 4px 12px rgba(217, 48, 37, 0.35); }
+    .btn-sos:active { background: #a51d14; transform: scale(0.98); }
     .btn-outline { background: #f8f9fa; border: 1px solid #dadce0; color: #1a73e8; }
     .btn-outline:active { background: #e8f0fe; }
     .info-box { background: #f8f9fa; border-radius: 8px; padding: 12px; font-size: 13px; color: #3c4043; line-height: 1.6; }
+    .mode-pill { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 10px; font-weight: bold; }
+    .moving { background: #e8f0fe; color: #1a73e8; }
+    .idle { background: #e6f4ea; color: #137333; }
   </style>
 </head>
 <body>
@@ -39,8 +44,15 @@
       📍 Test Konumu Gönder (Simülasyon)
     </button>
 
+    <!-- SOS Panik Butonu -->
+    <button class="btn-sos" onclick="triggerSos()">
+      🚨 SOS / ACİL DURUM BİLDİR
+    </button>
+
     <div class="info-box" style="margin-top: 14px;">
+      <div><strong>Pil Koruma:</strong> <span id="battery-mode" class="mode-pill idle">🔋 Akıllı Mod Aktif</span></div>
       <div><strong>Son İletilen:</strong> <span id="last-coords">Henüz gönderilmedi</span></div>
+      <div><strong>Hız:</strong> <span id="current-speed">0 km/s</span></div>
       <div><strong>Saat:</strong> <span id="last-time">-</span></div>
       <div><strong>Durum:</strong> <span id="status-msg">Hazır</span></div>
     </div>
@@ -54,9 +66,34 @@
     const lastCoordsSpan = document.getElementById('last-coords');
     const lastTimeSpan = document.getElementById('last-time');
     const statusMsgSpan = document.getElementById('status-msg');
+    const currentSpeedSpan = document.getElementById('current-speed');
+    const batteryModeSpan = document.getElementById('battery-mode');
     const btnToggle = document.getElementById('btn-toggle-tracking');
 
     let watchId = null;
+    let lastSentLat = null;
+    let lastSentLon = null;
+    let lastSentTime = 0;
+    let currentBattery = 95;
+
+    // Pil seviyesini tarayıcıdan öğren (Battery API)
+    if (navigator.getBattery) {
+      navigator.getBattery().then(b => {
+        currentBattery = Math.round(b.level * 100);
+        b.addEventListener('levelchange', () => { currentBattery = Math.round(b.level * 100); });
+      }).catch(() => {});
+    }
+
+    // Haversine Metre Hesabı
+    function getDistanceMeters(lat1, lon1, lat2, lon2) {
+      const R = 6371e3;
+      const φ1 = lat1 * Math.PI / 180;
+      const φ2 = lat2 * Math.PI / 180;
+      const Δφ = (lat2 - lat1) * Math.PI / 180;
+      const Δλ = (lon2 - lon1) * Math.PI / 180;
+      const a = Math.sin(Δφ/2)**2 + Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ/2)**2;
+      return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    }
 
     socket.on('connect', () => {
       connBadge.textContent = '● Merkeze Bağlı';
@@ -70,57 +107,128 @@
       statusMsgSpan.textContent = 'Bağlantı koptu, yeniden deneniyor...';
     });
 
-    function sendLocation(lat, lon, speed = 0, battery = 90) {
+    // Konum Gönderme (Akıllı Pil Tasarrufu ile)
+    function sendLocation(lat, lon, speed = 0, force = false) {
+      const now = Date.now();
+      const speedKm = Math.round(speed || 0);
+
+      // Akıllı Tasarruf Kontrolü:
+      if (!force && lastSentLat !== null && lastSentLon !== null) {
+        const dist = getDistanceMeters(lastSentLat, lastSentLon, lat, lon);
+        const timeDiffSec = (now - lastSentTime) / 1000;
+
+        // Personel duruyorsa (Mesafe < 15 metre ve Hız < 3 km/s)
+        if (dist < 15 && speedKm < 3) {
+          batteryModeSpan.textContent = '🔋 Duraklamada (Pil Tasarrufu: 45sn)';
+          batteryModeSpan.className = 'mode-pill idle';
+          // 45 saniye geçmediyse göndermeyi atla
+          if (timeDiffSec < 45) {
+            statusMsgSpan.textContent = `Hareketsiz mola (Sonraki: ${Math.round(45 - timeDiffSec)}sn)`;
+            return;
+          }
+        } else {
+          // Hareket halinde
+          batteryModeSpan.textContent = '🚗 Hareket Halinde (Canlı: 4sn)';
+          batteryModeSpan.className = 'mode-pill moving';
+          if (timeDiffSec < 4) return; // 4 saniyeden sık atıp pili harcama
+        }
+      }
+
+      lastSentLat = lat;
+      lastSentLon = lon;
+      lastSentTime = now;
+
       const userId = userIdInput.value.trim() || 'Saha_Personeli';
       const timeStr = new Date().toLocaleTimeString();
       const payload = {
         userId: userId,
         latitude: lat,
         longitude: lon,
-        speed: speed,
-        battery: battery,
+        speed: speedKm,
+        battery: currentBattery,
         timestamp: new Date().toISOString()
       };
 
-      // 1. Soket
       if (socket && socket.connected) {
         socket.emit('updateLocation', payload);
       }
 
-      // 2. HTTP POST (Garanti yedek)
       fetch('/update', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: userId, lat: lat, lon: lon, speed: speed, battery: battery })
+        body: JSON.stringify({ id: userId, lat: lat, lon: lon, speed: speedKm, battery: currentBattery })
       })
       .then(r => r.json())
       .then((data) => {
         if (data.status === 'OFF_SHIFT') {
           connBadge.textContent = '⏰ Mesai Dışı';
           connBadge.className = 'status-badge offline';
-          statusMsgSpan.textContent = `Mesai Dışı: ${data.message}`;
+          statusMsgSpan.textContent = data.message || 'Mesai dışı takip durduruldu.';
         } else {
-          connBadge.textContent = '● Merkeze Bağlı';
-          connBadge.className = 'status-badge online';
-          statusMsgSpan.textContent = `Konum merkeze iletildi (${timeStr})`;
+          lastCoordsSpan.textContent = `${lat.toFixed(5)}, ${lon.toFixed(5)}`;
+          lastTimeSpan.textContent = timeStr;
+          currentSpeedSpan.textContent = `${speedKm} km/s`;
+          statusMsgSpan.textContent = 'Konum merkeze iletildi.';
         }
-      }).catch(() => {});
-
-      lastCoordsSpan.textContent = `${lat.toFixed(5)}, ${lon.toFixed(5)} (${speed} km/s, %${battery})`;
-      lastTimeSpan.textContent = timeStr;
+      })
+      .catch((e) => {
+        statusMsgSpan.textContent = 'Gönderim hatası: ' + e.message;
+      });
     }
 
-    function sendSimulatedLocation() {
-      // Ankara Kızılay civarı hafif rastgele konum
-      const baseLat = 39.92077;
-      const baseLng = 32.85411;
-      const offsetLat = (Math.random() - 0.5) * 0.01;
-      const offsetLng = (Math.random() - 0.5) * 0.01;
-      sendLocation(baseLat + offsetLat, baseLng + offsetLng);
+    // SOS / Panik Butonu
+    function triggerSos() {
+      const userId = userIdInput.value.trim() || 'Saha_Personeli';
+      if (!confirm(`🚨 DİKKAT!\n\nMerkeze ve yöneticilere ACİL DURUM (SOS) çağrısı gönderilsin mi?`)) {
+        return;
+      }
+
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          const lat = pos.coords.latitude;
+          const lon = pos.coords.longitude;
+          const payload = {
+            userId: userId,
+            latitude: lat,
+            longitude: lon,
+            speed: Math.round((pos.coords.speed || 0) * 3.6),
+            battery: currentBattery,
+            timestamp: new Date().toISOString()
+          };
+
+          if (socket && socket.connected) {
+            socket.emit('sosAlert', payload);
+          }
+
+          fetch('/sos', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          }).then(() => {
+            alert(`🚨 ACİL DURUM BİLDİRİLDİ!\n\nKonumunuz (${lat.toFixed(5)}, ${lon.toFixed(5)}) siren ile yönetici ekranına iletildi.`);
+            statusMsgSpan.textContent = '🚨 SOS ÇAĞRISI AKTİF!';
+          }).catch(e => {
+            alert('SOS iletim hatası: ' + e.message);
+          });
+        },
+        () => {
+          // GPS alınamazsa son bilinenle gönder
+          const lat = lastSentLat || 41.042;
+          const lon = lastSentLon || 28.69;
+          fetch('/sos', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ userId, latitude: lat, longitude: lon, battery: currentBattery })
+          });
+          alert('🚨 SOS iletildi (Son bilinen koordinat)');
+        },
+        { enableHighAccuracy: true, timeout: 5000 }
+      );
     }
 
+    // Gerçek GPS Takibi
     function toggleTracking() {
-      if (watchId !== null) {
+      if (watchId) {
         navigator.geolocation.clearWatch(watchId);
         watchId = null;
         btnToggle.textContent = '▶ Gerçek GPS Takibini Başlat';
@@ -129,34 +237,42 @@
         return;
       }
 
-      if (!navigator.geolocation) {
-        alert('Cihazınızda GPS desteği bulunamadı.');
+      if (!('geolocation' in navigator)) {
+        alert('Cihazınızda GPS desteği bulunmuyor.');
         return;
       }
 
-      statusMsgSpan.textContent = 'GPS konumu alınıyor...';
-      btnToggle.textContent = '⏹ Takibi Durdur';
+      btnToggle.textContent = '⏸ Takibi Durdur';
       btnToggle.className = 'btn-danger';
+      statusMsgSpan.textContent = 'GPS uyduları aranıyor...';
 
       watchId = navigator.geolocation.watchPosition(
         (pos) => {
-          sendLocation(pos.coords.latitude, pos.coords.longitude);
+          const lat = pos.coords.latitude;
+          const lon = pos.coords.longitude;
+          const speedKm = Math.round((pos.coords.speed || 0) * 3.6);
+          sendLocation(lat, lon, speedKm);
         },
         (err) => {
-          statusMsgSpan.textContent = `GPS Hatası: ${err.message}`;
-          alert(`Konum izni verin: ${err.message}`);
-          btnToggle.textContent = '▶ Gerçek GPS Takibini Başlat';
-          btnToggle.className = 'btn-success';
-          watchId = null;
+          statusMsgSpan.textContent = 'GPS Hatası: ' + err.message;
         },
         {
           enableHighAccuracy: true,
-          maximumAge: 0,
-          timeout: 10000
+          timeout: 10000,
+          maximumAge: 0
         }
       );
+    }
+
+    // Test Konumu
+    let simLat = 41.04239;
+    let simLon = 28.68986;
+    function sendSimulatedLocation() {
+      simLat += (Math.random() - 0.45) * 0.002;
+      simLon += (Math.random() - 0.45) * 0.002;
+      const simSpeed = Math.floor(Math.random() * 45);
+      sendLocation(simLat, simLon, simSpeed, true);
     }
   </script>
 </body>
 </html>
-

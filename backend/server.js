@@ -102,22 +102,25 @@ app.get('/locations', (req, res) => {
   res.json(activeLocations);
 });
 
-// 3. Personelin Gecmis Rotasi (Breadcrumbs / Polyline)
+// 3. Personelin Gecmis Rotasi (Breadcrumbs / Polyline, Tarih Filtreli)
 app.get('/history/:userId', (req, res) => {
-  const limit = req.query.limit ? parseInt(req.query.limit) : 500;
-  const history = db.getHistory(req.params.userId, limit);
+  const limit = req.query.limit ? parseInt(req.query.limit) : 1000;
+  const date = req.query.date || null;
+  const history = db.getHistory(req.params.userId, limit, date);
   res.json(history);
 });
 
-// 4. Personelin Gunluk Ozeti (Toplam km, max hiz, aktif sure)
+// 4. Personelin Gunluk Ozeti (Toplam km, max hiz, aktif sure, Tarih Filtreli)
 app.get('/summary/:userId', (req, res) => {
-  const summary = db.getDailySummary(req.params.userId);
+  const date = req.query.date || null;
+  const summary = db.getDailySummary(req.params.userId, date);
   res.json(summary);
 });
 
-// 5. Excel / CSV Dokumu (Turkce Excel uyumlu - Noktali virgul ve UTF-8 BOM)
+// 5. Excel / CSV Dokumu (Turkce Excel uyumlu - Noktali virgul ve UTF-8 BOM, Tarih Filtreli)
 app.get('/export-csv/:userId', (req, res) => {
-  let history = db.getHistory(req.params.userId, 5000);
+  const date = req.query.date || null;
+  let history = db.getHistory(req.params.userId, 5000, date);
   if (!history || history.length === 0) {
     if (activeLocations[req.params.userId]) {
       history = [activeLocations[req.params.userId]];
@@ -139,6 +142,22 @@ app.get('/export-csv/:userId', (req, res) => {
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(req.params.userId)}_gecmis_rota.csv"`);
   res.send('\uFEFF' + csv);
+});
+
+// 5.1 Acil Durum / SOS Bildirimi
+app.post('/sos', (req, res) => {
+  const { userId, latitude, longitude, speed, battery, timestamp } = req.body;
+  const alertPayload = {
+    userId: userId || 'Bilinmeyen Personel',
+    latitude: Number(latitude) || 0,
+    longitude: Number(longitude) || 0,
+    speed: Number(speed) || 0,
+    battery: Number(battery) || 100,
+    timestamp: timestamp || new Date().toISOString()
+  };
+  io.emit('sosAlert', alertPayload);
+  console.log(`[🚨 SOS ÇAĞRISI] ${alertPayload.userId} acil durum bildirdi! (${alertPayload.latitude}, ${alertPayload.longitude})`);
+  res.json({ status: 'SOS_EMITTED', data: alertPayload });
 });
 
 // 6. Haftalik Calisma ve Mesai Saatleri Ayarlari
@@ -204,6 +223,12 @@ io.on('connection', (socket) => {
   socket.emit('initialLocations', activeLocations);
   socket.emit('geofencesUpdate', db.getGeofences());
   socket.emit('shiftSettingsUpdate', db.getShiftSettings());
+
+  socket.on('sosAlert', (data) => {
+    if (!data || !data.userId) return;
+    io.emit('sosAlert', data);
+    console.log(`[🚨 SOKET SOS] ${data.userId} acil durum çağırdı!`);
+  });
 
   socket.on('updateLocation', (data) => {
     if (!data || !data.userId) return;

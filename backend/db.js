@@ -133,22 +133,33 @@ function getLatestLocations() {
   }
 }
 
-// Personelin gecmis rota noktalarini getir (Zaman sirali)
-function getHistory(userId, limit = 500) {
+// Personelin gecmis rota noktalarini getir (Zaman sirali, opsiyonel tarih filtreli)
+function getHistory(userId, limit = 500, date = null) {
   if (db && !useJsonFallback) {
-    const stmt = db.prepare(`
-      SELECT latitude, longitude, speed, battery, timestamp
-      FROM locations
-      WHERE userId = ?
-      ORDER BY id ASC
-      LIMIT ?
-    `);
-    return stmt.all(userId, limit);
+    if (date) {
+      const stmt = db.prepare(`
+        SELECT latitude, longitude, speed, battery, timestamp
+        FROM locations
+        WHERE userId = ? AND timestamp LIKE ?
+        ORDER BY id ASC
+        LIMIT ?
+      `);
+      return stmt.all(userId, `${date}%`, limit);
+    } else {
+      const stmt = db.prepare(`
+        SELECT latitude, longitude, speed, battery, timestamp
+        FROM locations
+        WHERE userId = ?
+        ORDER BY id ASC
+        LIMIT ?
+      `);
+      return stmt.all(userId, limit);
+    }
   } else {
     try {
       const data = JSON.parse(fs.readFileSync(jsonDbPath, 'utf8'));
       return data.locations
-        .filter((l) => l.userId === userId)
+        .filter((l) => l.userId === userId && (!date || (l.timestamp && l.timestamp.startsWith(date))))
         .slice(-limit);
     } catch (e) {
       return [];
@@ -156,11 +167,11 @@ function getHistory(userId, limit = 500) {
   }
 }
 
-// Gunluk Ozet
-function getDailySummary(userId) {
-  const history = getHistory(userId, 2000);
+// Gunluk Ozet (Tarih filtreli)
+function getDailySummary(userId, date = null) {
+  const history = getHistory(userId, 3000, date);
   if (!history || history.length === 0) {
-    return { totalKm: 0, pointsCount: 0, maxSpeed: 0, startTime: null, endTime: null };
+    return { totalKm: '0.00', pointsCount: 0, maxSpeed: 0, startTime: null, endTime: null };
   }
 
   let totalMeters = 0;
