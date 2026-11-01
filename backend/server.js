@@ -230,8 +230,8 @@ io.on('connection', (socket) => {
   });
 });
 
-// SPA ve Statik Rota Yonlendirmesi
-app.get('*', (req, res, next) => {
+// SPA ve Statik Rota Yonlendirmesi (Express 5 uyumlu)
+app.use((req, res, next) => {
   if (
     req.path.startsWith('/api') ||
     req.path.startsWith('/socket.io') ||
