@@ -161,8 +161,8 @@ const MAP_LAYERS = {
   },
   dark: {
     name: '🌙 Gece',
-    url: 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}',
-    attribution: '&copy; Esri Dark'
+    url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+    attribution: '&copy; OpenStreetMap'
   }
 };
 
@@ -920,8 +920,10 @@ export default function App() {
           
           <TileLayer
             key={currentLayer}
+            className={currentLayer === 'dark' ? 'dark-tiles' : ''}
             attribution={MAP_LAYERS[currentLayer].attribution}
             url={MAP_LAYERS[currentLayer].url}
+            maxZoom={19}
           />
 
           {/* Coğrafi Çit Çemberleri */}

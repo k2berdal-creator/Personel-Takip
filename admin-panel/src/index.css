@@ -20,3 +20,9 @@ body { margin: 0; padding: 0; font-family: sans-serif; }
 .playback-marker {
   animation: pulseVehicle 0.8s infinite;
 }
+
+/* Kusursuz Gece Modu - Sokak detaylari kaybolmaz, Zoom 19'a kadar calisir */
+.dark-tiles .leaflet-tile {
+  filter: invert(100%) hue-rotate(180deg) brightness(80%) contrast(110%);
+}
+
