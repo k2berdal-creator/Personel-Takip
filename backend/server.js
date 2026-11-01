@@ -11,13 +11,15 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Statik panel onceligi: Derlenmis React admin paneli ve mobil istemci
-app.use(express.static(path.join(__dirname, 'public')));
+// Statik panel onceligi: Derlenmis React admin paneli (admin-panel/dist)
 const adminDistPath = path.join(__dirname, '../admin-panel/dist');
 if (fs.existsSync(adminDistPath)) {
   console.log('[PROD] React Admin Panel (admin-panel/dist) statik olarak sunuluyor.');
   app.use(express.static(adminDistPath));
 }
+
+// Mobil istemci ve diger statik dosyalar (index.html haric):
+app.use(express.static(path.join(__dirname, 'public'), { index: false }));
 
 const server = http.createServer(app);
 const io = new Server(server, {
@@ -353,7 +355,7 @@ app.use((req, res, next) => {
   if (fs.existsSync(adminIndex)) {
     return res.sendFile(adminIndex);
   }
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+  res.sendFile(path.join(__dirname, 'public', 'takip.html'));
 });
 
 const PORT = process.env.PORT || 5005;
